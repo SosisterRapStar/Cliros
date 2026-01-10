@@ -1,8 +1,8 @@
 package message
 
 type Message struct {
+	Type     string
 	SagaID   string
 	ActionID string
-	Type     string
 	Payload  map[string]any
 }
