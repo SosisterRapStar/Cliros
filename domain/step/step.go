@@ -1,10 +1,11 @@
-package action
+package step
 
 import (
 	"context"
 	"fmt"
 	"maps"
 
+	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/google/uuid"
 )
 
@@ -13,8 +14,8 @@ const (
 	sagaID = "sagaID"
 )
 
-type Execute func(ctx context.Context) error
-type Compensate func(ctx context.Context) error
+type Execute func(ctx context.Context) (message.Message, error)
+type Compensate func(ctx context.Context) (message.Message, error)
 
 type StepParams struct {
 	Name       string
@@ -79,19 +80,19 @@ func (a Step) Context() map[string]string {
 	return maps.Clone(a.context)
 }
 
-func (a Step) Execute(ctx context.Context) error {
-	if a.execute == nil {
-		return nil
-	}
-	return a.execute(ctx)
-}
+// func (a Step) Execute(ctx context.Context) error {
+// 	if a.execute == nil {
+// 		return nil
+// 	}
+// 	return a.execute(ctx)
+// }
 
-func (a Step) Compensate(ctx context.Context) error {
-	if a.compensate == nil {
-		return nil
-	}
-	return a.compensate(ctx)
-}
+// func (a Step) Compensate(ctx context.Context) error {
+// 	if a.compensate == nil {
+// 		return nil
+// 	}
+// 	return a.compensate(ctx)
+// }
 
 func newID() (uuid.UUID, error) {
 	return uuid.NewV7()
