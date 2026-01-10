@@ -22,17 +22,18 @@ type StepParams struct {
 	Context    map[string]string
 	Execute    Execute
 	Compensate Compensate
+	Routing    RoutingConfig
 }
 
 type Step struct {
-	name              string
-	stepID            string
-	sagaID            string
-	context           map[string]string
-	execute           Execute // может эта функция отправки долж
-	compensate        Compensate
-	nextExecute       string // топик для передачи сообщение следующему сервису
-	compensateExecute        //
+	name        string
+	stepID      string
+	sagaID      string
+	context     map[string]string
+	execute     Execute
+	compensate  Compensate
+	nextExecute string
+	routing     RoutingConfig
 }
 
 func New(p StepParams) (Step, error) {
@@ -63,6 +64,7 @@ func New(p StepParams) (Step, error) {
 		context:    p.Context,
 		execute:    p.Execute,
 		compensate: p.Compensate,
+		routing:    p.Routing,
 	}, nil
 }
 
@@ -86,18 +88,12 @@ func (a Step) Context() map[string]string {
 // при этом надо разграничить класс,
 // который держит сагу и который держит пабсаб и остальные зависимости
 // надо указать, а в какой-топик отправлять, а что делать
-func (a Step) Execute(ctx context.Context) error {
-	if a.execute == nil {
-		return nil
-	}
-	return a.execute(ctx)
+func (a Step) Execute(ctx context.Context, msg message.Message) error {
+	return nil
 }
 
-func (a Step) Compensate(ctx context.Context) error {
-	if a.compensate == nil {
-		return nil
-	}
-	return a.compensate(ctx)
+func (a Step) Compensate(ctx context.Context, msg message.Message) error {
+	return nil
 }
 
 func newID() (uuid.UUID, error) {

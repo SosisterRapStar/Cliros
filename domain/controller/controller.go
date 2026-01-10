@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/SosisterRapStar/LETI-paper/domain/step"
@@ -28,9 +29,42 @@ type Controller struct {
 // как пользователь будет передавать переменные из своей функции в Message Payload
 // то есть как пользователь будет передавать
 // пусть в Step будет возврат сообщений
-func (c *Controller) RegisterStep(topic string, step step.Step) {
-	// должны зарегестировать с хэндлер на выполнение действия при получении сообщения како-го либо типа
-	// пользователь хочет получать сообщения и данные из них, поэтому наверное нужно
 
-	//
+// короче у нас 1 топик, как для выполенения транзакций, так и для компенсации транзакций, получается, что мы
+// определяем - что делать по типу сообщений
+// вообще как будто мы должны регистровать не шаг, а execute или compensate, то есть сами функции
+// то есть пусть step
+// нам нужно сейчас как-то получить
+func (c *Controller) Register(topic string, step step.Step) {
+	var (
+		ctx context.Context = context.Background()
+	)
+	c.Pubsub.Subscribe(ctx, topic, func(ctx context.Context, msg message.Message) error {
+		var (
+			msgType message.MessageType
+		)
+		msgType, err := msg.GetType()
+
+		if err != nil {
+			return err
+		}
+
+		switch msgType {
+		// позже дополним эту логику до чего-нибудь,
+		// по типу retry например
+		case message.EventTypeExecute:
+			step.Execute(ctx, msg)
+		case message.EventTypeCompensate:
+			step.Compensate(ctx, msg)
+		default:
+			return fmt.Errorf("invalid message type: %q", msgType)
+		}
+		return nil
+	})
 }
+
+// сейщас проблема в том, что у нас компенсация и регистрация идут в одном и том же шаге, то есть
+
+// пользователь должен зарегестировать как
+
+// пользователь по идее создает шаг и вешает шаги на топики
