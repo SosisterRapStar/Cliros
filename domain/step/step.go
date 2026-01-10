@@ -14,8 +14,8 @@ const (
 	sagaID = "sagaID"
 )
 
-type Execute func(ctx context.Context) (message.Message, error)
-type Compensate func(ctx context.Context) (message.Message, error)
+type Execute func(ctx context.Context, msg message.Message) (message.Message, error)
+type Compensate func(ctx context.Context, msg message.Message) (message.Message, error)
 
 type StepParams struct {
 	Name       string
@@ -25,12 +25,14 @@ type StepParams struct {
 }
 
 type Step struct {
-	name       string
-	stepID     string
-	sagaID     string
-	context    map[string]string
-	execute    Execute
-	compensate Compensate
+	name              string
+	stepID            string
+	sagaID            string
+	context           map[string]string
+	execute           Execute // может эта функция отправки долж
+	compensate        Compensate
+	nextExecute       string // топик для передачи сообщение следующему сервису
+	compensateExecute        //
 }
 
 func New(p StepParams) (Step, error) {
@@ -80,19 +82,23 @@ func (a Step) Context() map[string]string {
 	return maps.Clone(a.context)
 }
 
-// func (a Step) Execute(ctx context.Context) error {
-// 	if a.execute == nil {
-// 		return nil
-// 	}
-// 	return a.execute(ctx)
-// }
+// должны где-то отправлять сообщение дальше, для саги
+// при этом надо разграничить класс,
+// который держит сагу и который держит пабсаб и остальные зависимости
+// надо указать, а в какой-топик отправлять, а что делать
+func (a Step) Execute(ctx context.Context) error {
+	if a.execute == nil {
+		return nil
+	}
+	return a.execute(ctx)
+}
 
-// func (a Step) Compensate(ctx context.Context) error {
-// 	if a.compensate == nil {
-// 		return nil
-// 	}
-// 	return a.compensate(ctx)
-// }
+func (a Step) Compensate(ctx context.Context) error {
+	if a.compensate == nil {
+		return nil
+	}
+	return a.compensate(ctx)
+}
 
 func newID() (uuid.UUID, error) {
 	return uuid.NewV7()
@@ -114,3 +120,8 @@ func getDefaultMeta() (map[string]string, error) {
 		sagaID: sID.String(),
 	}, nil
 }
+
+// при получении сообщения, должны посмотреть на тип сообщения
+// если тип execute - идем дальше
+// если тип compensate - вызываем функцию компенсирования
+// а если хотим retry действие а не компенсацию?
