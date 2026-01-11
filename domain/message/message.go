@@ -6,23 +6,24 @@ import (
 )
 
 type Message struct {
-	Type    MessageType    `json:"type"`
-	SagaID  string         `json:"saga_id"`
-	StepID  string         `json:"step_id"`
+	typ    MessageType `json:"type"`
+	sagaID string      `json:"saga_id"`
+	// StepName string         `json:"step_name"`
 	Payload map[string]any `json:"payload"`
 }
 
 var validTypes = []MessageType{
-	EventTypeExecute,
-	EventTypeCompensate,
-	EventTypeRetry,
-	EventTypeCompleted,
+	EventTypeComplete,
 	EventTypeFailed,
 }
 
 func (m *Message) GetType() (MessageType, error) {
-	if !slices.Contains(validTypes, m.Type) {
-		return "", fmt.Errorf("invalid message type: %q", m.Type)
+	if !slices.Contains(validTypes, m.typ) {
+		return "", fmt.Errorf("invalid message type: %q", m.typ)
 	}
-	return m.Type, nil
+	return m.typ, nil
+}
+
+func (m *Message) GetSagaID() string {
+	return m.sagaID
 }

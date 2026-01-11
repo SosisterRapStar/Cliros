@@ -3,11 +3,8 @@ package step
 import (
 	"context"
 	"fmt"
-	"maps"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/broker"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
-	"github.com/google/uuid"
 )
 
 // нам нужна точка входа для создание саги
@@ -15,34 +12,43 @@ import (
 // может быть и такое, что мы не создали сагу, а являемся одним из сервисов, который должен выполнить транзакцию
 // поэтому id саги получим оттуда
 // нужно дать пользователю возможность самому формировать id саги
-const (
-	stepID = "stepID"
-	sagaID = "sagaID"
-)
+
+// желательно отслеживать id шага или дать шагу имя
+// const (
+// 	name   = "name"
+// 	sagaID = "sagaID"
+// )
 
 type Execute func(ctx context.Context, msg message.Message) (message.Message, error)
 type Compensate func(ctx context.Context, msg message.Message) (message.Message, error)
+
+// здесь можно указать логику, что делать при ошибке, если нужно например сделать retry действия, а не сразу откатить транзакцию
+type ErrorHandler func(ctx context.Context, msg message.Message, err error) (message.Message, error)
+
 type IDFunc func() string
 
+// обязательно подумать о том, что нам нужно хранить локальные метаданные для каждой саги и что это очень обязательно
+// то есть каждый step, должен хранить о себе данные
+// пусть будем хранить данные так: saga_id + step_id
 type StepParams struct {
-	Name        string
-	Context     map[string]string
-	Execute     Execute
-	Compensate  Compensate
-	Routing     RoutingConfig
-	IDGenerator IDFunc
+	Name       string
+	Execute    Execute
+	Compensate Compensate
+	Routing    RoutingConfig
+	// RetryPolicy *RetryPolicy
+	OnError ErrorHandler
 }
 
 type Step struct {
-	name        string
-	stepID      string // какая-то залупа, это должно быть не тут
-	sagaID      string // какая-то залупа, id саги должны брать из пришедших messages
-	context     map[string]string
-	execute     Execute
-	compensate  Compensate
-	nextExecute string
-	routing     RoutingConfig
-	idGenerator IDFunc
+	name string
+	// sagaID      string
+	// какая-то залупа, id саги должны брать из пришедших messages
+	execute    Execute
+	compensate Compensate
+	routing    RoutingConfig
+	// пользователь должен сформировать правильное сообщение для другого сервиса, дать ему контекст, чтобы тот откатился или что-то сделал
+	onError ErrorHandler
+	// retryPolicy *RetryPolicy
 }
 
 // проблема в том, что мы можем сделать компенсацию как для нашего шага, так сделать onCompensate для шага execute
@@ -52,34 +58,12 @@ func New(p StepParams) (Step, error) {
 		return Step{}, fmt.Errorf("Step name is required")
 	}
 
-	if p.Context == nil {
-		p.Context = make(map[string]string)
-	}
-
-	defaultMeta, err := getDefaultMeta()
-	if err != nil {
-		return Step{}, err
-	}
-
-	if p.IDGenerator == nil {
-		p.IDGenerator = newID
-	}
-
-	// Используем значения по умолчанию только если пользователь не указал свои
-	for k, v := range defaultMeta {
-		if _, exists := p.Context[k]; !exists {
-			p.Context[k] = v
-		}
-	}
-
 	return Step{
 		name:       p.Name,
-		stepID:     defaultMeta[stepID],
-		sagaID:     defaultMeta[sagaID],
-		context:    p.Context,
 		execute:    p.Execute,
 		compensate: p.Compensate,
 		routing:    p.Routing,
+		onError:    p.OnError,
 	}, nil
 }
 
@@ -87,56 +71,32 @@ func (s Step) Name() string {
 	return s.name
 }
 
-func (s Step) StepID() string {
-	return s.stepID
-}
-
-func (s Step) SagaID() string {
-	return s.sagaID
-}
-
-func (s Step) Context() map[string]string {
-	return maps.Clone(s.context)
-}
-
 // должны где-то отправлять сообщение дальше, для саги
 // при этом надо разграничить класс,
 // который держит сагу и который держит пабсаб и остальные зависимости
 // надо указать, а в какой-топик отправлять, а что делать
-func (s Step) Execute(ctx context.Context, msg message.Message, pubsub broker.Pubsub) error {
-	newMessage, err := s.execute(ctx, msg)
-	if err != nil {
-		// так как произошла ошибка, можем либо повторить, либо делать сразу компенсацию
-		// для повтора сделаем декоратор с повторами, но потом
-		// для компенсаций нужен отдельный message
-		// нужно как-то сделать маппер сообщений как будто, если пользователь хочет передать какую-то
-		s.compensate(ctx)
-	}
+// ладно на самом деле тут можно сделать какую-то логику ретрая
+// можно например добавить в структуру step поле onRetry и т.д.
+// поэтому какой-то смысл есть наверное
+func (s Step) GetRouting() RoutingConfig {
+	return s.routing
 }
 
-func (s Step) Compensate(ctx context.Context, msg message.Message) error {
-	return nil
+func (s Step) Execute(ctx context.Context, msg message.Message) (message.Message, error) {
+	return s.execute(ctx, msg)
 }
 
-func newID() (uuid.UUID, error) {
-	return uuid.NewV7()
+// // для повтора сделаем декоратор с повторами, но потом
+
+// не знаю зачем я сделал такую логику тупую, типа нахуя, можно же просто вызывать s.compensate
+// но я не почему-то не могу так сделать, что-то внутри хочет сделать этот ебанный полугеттер полухуй
+
+func (s Step) OnFail(ctx context.Context, msg message.Message) (message.Message, error) {
+	return s.compensate(ctx, msg)
 }
 
-func getDefaultMeta() (map[string]string, error) {
-	stID, err := newID()
-	if err != nil {
-		return nil, err
-	}
-
-	sID, err := newID()
-	if err != nil {
-		return nil, err
-	}
-
-	return map[string]string{
-		stepID: stID.String(),
-		sagaID: sID.String(),
-	}, nil
+func (s Step) GetOnError() ErrorHandler {
+	return s.onError
 }
 
 // при получении сообщения, должны посмотреть на тип сообщения
