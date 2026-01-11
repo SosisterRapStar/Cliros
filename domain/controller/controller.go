@@ -4,17 +4,11 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/SosisterRapStar/LETI-paper/domain/broker"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/SosisterRapStar/LETI-paper/domain/step"
+	"github.com/bytedance/gopkg/util/logger"
 )
-
-// чтобы работать с библиотекой, пабсаб для обмена сообщениями должен реализовывать такой интерфейс
-// нужен еще какокой-нибудь высококровневый интерфейс
-type Pubsub interface {
-	Publish(ctx context.Context, topic string, message message.Message) error
-	Subscribe(ctx context.Context, topic string, handler func(ctx context.Context, message message.Message) error) error
-	Close() error
-}
 
 // пользователь должен указать pubsub и еще должен указать, какие топики что делают
 // то есть какие в какие топики пользователь должен отправить сообщение после обработки текущего
@@ -23,7 +17,7 @@ type Pubsub interface {
 // наверное это нужно делать в Step
 // пусть описание топиков для отката и топиков для следующих действий будет не в контроллере, а step
 type Controller struct {
-	Pubsub Pubsub
+	Pubsub broker.Pubsub
 }
 
 // как пользователь будет передавать переменные из своей функции в Message Payload
@@ -53,7 +47,10 @@ func (c *Controller) Register(topic string, step step.Step) {
 		// позже дополним эту логику до чего-нибудь,
 		// по типу retry например
 		case message.EventTypeExecute:
-			step.Execute(ctx, msg)
+			// надо сделать какое-то отдельное место, где бы мы это хэндлили, может сделать его в самом execute, методе step
+			if err := step.Execute(ctx, msg); err != nil {
+				logger.Warnf("error occured during action")
+			}
 		case message.EventTypeCompensate:
 			step.Compensate(ctx, msg)
 		default:
@@ -62,6 +59,11 @@ func (c *Controller) Register(topic string, step step.Step) {
 		return nil
 	})
 }
+
+// сначала нужно разобраться, где будет логика посыла сообщения следующему сервису
+
+// как будем публиковать, нам нужен pubsub еще и в самом step
+// тогда нужно проки
 
 // сейщас проблема в том, что у нас компенсация и регистрация идут в одном и том же шаге, то есть
 
