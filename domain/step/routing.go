@@ -2,5 +2,8 @@ package step
 
 type RoutingConfig struct {
 	NextStepTopics []string
-	ErrorTopics    []string
+	// здесь можно указать разные топики
+	// например, если человек не хочет отправлять компенсацию по цепочке,
+	// а хочет отправить ее нескольким сервисам
+	ErrorTopics []string
 }

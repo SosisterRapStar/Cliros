@@ -19,8 +19,8 @@ import (
 // 	sagaID = "sagaID"
 // )
 
-type Execute func(ctx context.Context, msg message.Message) (message.Message, error)
-type Compensate func(ctx context.Context, msg message.Message) (message.Message, error)
+// это типа хэндлер, сюда челбикс будет писать, что ему нужно для логики
+type Action func(ctx context.Context, msg message.Message) (message.Message, error)
 
 // здесь можно указать логику, что делать при ошибке, если нужно например сделать retry действия, а не сразу откатить транзакцию
 type ErrorHandler func(ctx context.Context, msg message.Message, err error) (message.Message, error)
@@ -32,19 +32,17 @@ type IDFunc func() string
 // пусть будем хранить данные так: saga_id + step_id
 type StepParams struct {
 	Name       string
-	Execute    Execute
-	Compensate Compensate
+	Execute    Action
+	Compensate Action
 	Routing    RoutingConfig
 	// RetryPolicy *RetryPolicy
 	OnError ErrorHandler
 }
 
 type Step struct {
-	name string
-	// sagaID      string
-	// какая-то залупа, id саги должны брать из пришедших messages
-	execute    Execute
-	compensate Compensate
+	name       string
+	execute    Action
+	compensate Action
 	routing    RoutingConfig
 	// пользователь должен сформировать правильное сообщение для другого сервиса, дать ему контекст, чтобы тот откатился или что-то сделал
 	onError ErrorHandler
@@ -82,15 +80,13 @@ func (s Step) GetRouting() RoutingConfig {
 	return s.routing
 }
 
+// не знаю зачем я сделал такую логику тупую, типа нахуя, можно же просто вызывать s.execute
+// но я почему-то не могу так сделать, что-то внутри хочет сделать этот ебанный полугеттер полухуй
 func (s Step) Execute(ctx context.Context, msg message.Message) (message.Message, error) {
 	return s.execute(ctx, msg)
 }
 
-// // для повтора сделаем декоратор с повторами, но потом
-
-// не знаю зачем я сделал такую логику тупую, типа нахуя, можно же просто вызывать s.compensate
-// но я не почему-то не могу так сделать, что-то внутри хочет сделать этот ебанный полугеттер полухуй
-
+// для повтора сделаем декоратор с повторами, но потом
 func (s Step) OnFail(ctx context.Context, msg message.Message) (message.Message, error) {
 	return s.compensate(ctx, msg)
 }
