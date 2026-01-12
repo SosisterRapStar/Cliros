@@ -35,27 +35,36 @@ func (c *Controller) Register(topic string, step step.Step) {
 		ctx context.Context = context.Background()
 	)
 	c.Pubsub.Subscribe(ctx, topic, func(ctx context.Context, msg message.Message) error {
+		var (
+			sagaID string
+		)
+
 		msgType, err := msg.GetType()
 		if err != nil {
 			return err
 		}
 
-		sagaID := msg.GetSagaID()
-		if sagaID != "" {
-			sagaID, err := c.generateSagaIDByUUIDV7()
+		sagaID = msg.GetSagaID()
+
+		// если нет саги в сообщении, то значит - это первое сообщение в цепочке
+		if sagaID == "" {
+			logger.Info("SAGA first step, generated id: %s", sagaID)
+			sagaID, err = c.generateSagaIDByUUIDV7()
 			if err != nil {
 				return fmt.Errorf("error occured generating saga id")
 			}
-
 		}
-
 		switch msgType {
-		// позже дополним эту логику до чего-нибудь,
-		// по типу retry например
 		case message.EventTypeComplete:
-
+			if err := c.executeAction(step, msg); err != nil {
+				logger.Warnf("error occured: %s", err.Error())
+				return err
+			}
 		case message.EventTypeFailed:
-			step.OnFail(ctx, msg)
+			if err := c.compensateAction(step, msg); err != nil {
+				logger.Warnf("error occured: %s", err.Error())
+				return err
+			}
 		default:
 			return fmt.Errorf("invalid message type: %q", msgType)
 		}
@@ -170,8 +179,8 @@ func (c *Controller) sendNextToExecute(ctx context.Context, stp step.Step, msg m
 	return nil
 }
 
-func (c *Controller) compensateAction(step step.Step, msg message.Message) {
-
+func (c *Controller) compensateAction(step step.Step, msg message.Message) error {
+	return nil
 }
 
 // блин, нужно как-то придумать, как сделать что-то типа
