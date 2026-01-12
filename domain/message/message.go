@@ -27,3 +27,7 @@ func (m *Message) GetType() (MessageType, error) {
 func (m *Message) GetSagaID() string {
 	return m.sagaID
 }
+
+func (m *Message) SetSagaID() {
+
+}

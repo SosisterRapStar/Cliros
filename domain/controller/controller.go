@@ -46,6 +46,7 @@ func (c *Controller) Register(topic string, step step.Step) {
 			if err != nil {
 				return fmt.Errorf("error occured generating saga id")
 			}
+
 		}
 
 		switch msgType {
@@ -61,6 +62,8 @@ func (c *Controller) Register(topic string, step step.Step) {
 		return nil
 	})
 }
+
+func (c *Controller)
 
 func (c *Controller) generateSagaIDByUUIDV7() (string, error) {
 	uuid, err := uuid.NewV7()
