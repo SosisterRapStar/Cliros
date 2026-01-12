@@ -63,8 +63,6 @@ func (c *Controller) Register(topic string, step step.Step) {
 	})
 }
 
-func (c *Controller)
-
 func (c *Controller) generateSagaIDByUUIDV7() (string, error) {
 	uuid, err := uuid.NewV7()
 	if err != nil {
@@ -85,6 +83,7 @@ func (c *Controller) executeAction(stp step.Step, msg message.Message) error {
 		if errHandler := stp.GetOnError(); errHandler != nil {
 			newMsg, err := errHandler(ctx, msg, err)
 			if err != nil {
+				newMsg.MessageType = message.EventTypeFailed
 				err := c.sendOnFail(ctx, stp, newMsg)
 				if err != nil {
 					logger.Warn("error occured sending failed event to services")
@@ -103,12 +102,26 @@ func (c *Controller) executeAction(stp step.Step, msg message.Message) error {
 			}
 		} else {
 			// тут хз какое отправлять сообщение
-			// тут типа нужно отправить сообщение с правильным коннекстом, чтобы было понятно, что должен сделать другой сервис для отката
-			c.sendOnFail(ctx, stp, msg)
+			// тут типа нужно отправить сообщение с правильным контекстом, чтобы было понятно, что должен сделать другой сервис для отката
+			// ну можно просто отослать ему обратно его же сообщение, как будто норм
+			msg.MessageType = message.EventTypeFailed
+			if err := c.sendOnFail(ctx, stp, msg); err != nil {
+				logger.Warn("error occured sending failed event to services")
+				logger.Warnf("saga is down")
+				return err
+			}
+			return nil
 		}
-		// если произошла ошибка - то компенсируем, но вот нужно ли
-		// а если на самом деле хочется сделать ретрай
 	}
+	// думал насчет контекстов, нам бы желательно дать возможность настройки контекстов пользователю
+	// еще можно подумать над какой-то абстракцией над состоянием шага по ходу всех этих махинаций
+	newMsg.MessageType = message.EventTypeComplete
+	if err := c.sendNextToExecute(ctx, stp, newMsg); err != nil {
+		logger.Warn("error occured sending failed event to services")
+		logger.Warnf("saga is down")
+		return err
+	}
+	return nil
 }
 
 func (c *Controller) sendOnFail(ctx context.Context, stp step.Step, msg message.Message) error {
@@ -118,7 +131,7 @@ func (c *Controller) sendOnFail(ctx context.Context, stp step.Step, msg message.
 	routing = stp.GetRouting()
 	if routing.ErrorTopics != nil {
 		for _, topic := range routing.ErrorTopics {
-			msg.Type = message.EventTypeFailed
+			msg.MessageType = message.EventTypeFailed
 			// тут нужен декоратор с ретраем для Publish обязательно
 			// декоратор можно скрыть за интерфейсом и дать возможность пользователю выбирать
 			// нужен ли ему ретрай или нет
@@ -143,7 +156,7 @@ func (c *Controller) sendNextToExecute(ctx context.Context, stp step.Step, msg m
 	routing = stp.GetRouting()
 	if routing.NextStepTopics != nil {
 		for _, topic := range routing.NextStepTopics {
-			msg.Type = message.EventTypeComplete
+			msg.MessageType = message.EventTypeComplete
 			// тут нужен декоратор с ретраем для Publish обязательно
 			if err := c.Pubsub.Publish(ctx, topic, msg); err != nil {
 				return err
