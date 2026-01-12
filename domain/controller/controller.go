@@ -34,34 +34,29 @@ func (c *Controller) Register(topic string, step step.Step) {
 	var (
 		ctx context.Context = context.Background()
 	)
+	// блять нужно что-то решить с контекстами иначе хуета тут будет полная нахуй
 	c.Pubsub.Subscribe(ctx, topic, func(ctx context.Context, msg message.Message) error {
 		var (
-			sagaID string
+			sagaID   string = msg.GetSagaID()
+			stepName string = msg.FromStep
 		)
+
+		logger.Info("got message from step: %s", stepName)
+		logger.Info("during saga: %s", sagaID)
 
 		msgType, err := msg.GetType()
 		if err != nil {
 			return err
 		}
 
-		sagaID = msg.GetSagaID()
-
-		// если нет саги в сообщении, то значит - это первое сообщение в цепочке
-		if sagaID == "" {
-			logger.Info("SAGA first step, generated id: %s", sagaID)
-			sagaID, err = c.generateSagaIDByUUIDV7()
-			if err != nil {
-				return fmt.Errorf("error occured generating saga id")
-			}
-		}
 		switch msgType {
 		case message.EventTypeComplete:
-			if err := c.executeAction(step, msg); err != nil {
+			if err := c.executeAction(ctx, step, msg); err != nil {
 				logger.Warnf("error occured: %s", err.Error())
 				return err
 			}
 		case message.EventTypeFailed:
-			if err := c.compensateAction(step, msg); err != nil {
+			if err := c.compensateAction(ctx, step, msg); err != nil {
 				logger.Warnf("error occured: %s", err.Error())
 				return err
 			}
@@ -80,107 +75,139 @@ func (c *Controller) generateSagaIDByUUIDV7() (string, error) {
 	return uuid.String(), nil
 }
 
-func (c *Controller) executeAction(stp step.Step, msg message.Message) error {
-	var (
-		ctx context.Context = context.Background()
-	)
+func (c *Controller) executeAction(ctx context.Context, stp step.Step, msg message.Message) error {
+	// ctx := context.Background() и вот хуй же пойми чо тут с контекстом нахуй делать
 
-	newMsg, err := stp.Execute(ctx, msg) // тут нужно подумать, так как пользователь не заполняет sagaID и не должен иметь к нему доступа
-	// sagaID должен быть обязательно закрытым параметром
-
+	newMsg, err := stp.Execute(ctx, msg)
 	if err != nil {
-		if errHandler := stp.GetOnError(); errHandler != nil {
-			newMsg, err := errHandler(ctx, msg, err)
-			if err != nil {
-				newMsg.MessageType = message.EventTypeFailed
-				err := c.sendOnFail(ctx, stp, newMsg)
-				if err != nil {
-					logger.Warn("error occured sending failed event to services")
-					logger.Warnf("saga is down")
-					return err
-				}
-				logger.Info("failed event sent to prev service")
-				return nil
-			} else {
-				logger.Info("on error actions succesfully done")
-				if err := c.sendNextToExecute(ctx, stp, newMsg); err != nil {
-					logger.Warn("error occured sending complete events to next services")
-					logger.Warnf("saga is down, sagaID: %s", msg.SagaID)
-					return err
-				}
-			}
-		} else {
-			// тут хз какое отправлять сообщение
-			// тут типа нужно отправить сообщение с правильным контекстом, чтобы было понятно, что должен сделать другой сервис для отката
-			// ну можно просто отослать ему обратно его же сообщение, как будто норм
-			msg.MessageType = message.EventTypeFailed
-			if err := c.sendOnFail(ctx, stp, msg); err != nil {
-				logger.Warn("error occured sending failed event to services")
-				logger.Warnf("saga is down")
-				return err
-			}
-			return nil
-		}
+		return c.handleExecuteError(ctx, stp, msg, err)
 	}
-	// думал насчет контекстов, нам бы желательно дать возможность настройки контекстов пользователю
-	// еще можно подумать над какой-то абстракцией над состоянием шага по ходу всех этих махинаций
-	newMsg.MessageType = message.EventTypeComplete
-	if err := c.sendNextToExecute(ctx, stp, newMsg); err != nil {
-		logger.Warn("error occured sending failed event to services")
-		logger.Warnf("saga is down")
-		return err
+
+	return c.sendSuccessMessage(ctx, stp, newMsg)
+}
+
+func (c *Controller) handleExecuteError(ctx context.Context, stp step.Step, msg message.Message, err error) error {
+	errHandler := stp.GetOnError()
+	if errHandler == nil {
+		return c.sendFailureMessage(ctx, stp, msg)
 	}
+
+	recoveryMsg, recoveryErr := errHandler(ctx, msg, err)
+	if recoveryErr != nil {
+		logger.Info("error handler failed, sending failure event")
+		return c.sendFailureMessage(ctx, stp, recoveryMsg)
+	}
+
+	logger.Info("error handler succeeded, continuing saga")
+	return c.sendSuccessMessage(ctx, stp, recoveryMsg)
+}
+
+func (c *Controller) sendSuccessMessage(ctx context.Context, stp step.Step, msg message.Message) error {
+	msg.MessageType = message.EventTypeComplete
+	if err := c.sendNextToExecute(ctx, stp, msg); err != nil {
+		logger.Warnf("failed to send complete event to next services, sagaID: %s", msg.SagaID)
+		return fmt.Errorf("saga execution failed: %w", err)
+	}
+	return nil
+}
+
+func (c *Controller) sendFailureMessage(ctx context.Context, stp step.Step, msg message.Message) error {
+	msg.MessageType = message.EventTypeFailed
+	if err := c.sendOnFail(ctx, stp, msg); err != nil {
+		logger.Warnf("failed to send failure event, sagaID: %s", msg.SagaID)
+		return fmt.Errorf("saga failure notification failed: %w", err)
+	}
+	logger.Info("failure event sent to previous services")
 	return nil
 }
 
 func (c *Controller) sendOnFail(ctx context.Context, stp step.Step, msg message.Message) error {
-	var (
-		routing step.RoutingConfig
-	)
-	routing = stp.GetRouting()
-	if routing.ErrorTopics != nil {
-		for _, topic := range routing.ErrorTopics {
-			msg.MessageType = message.EventTypeFailed
-			// тут нужен декоратор с ретраем для Publish обязательно
-			// декоратор можно скрыть за интерфейсом и дать возможность пользователю выбирать
-			// нужен ли ему ретрай или нет
-			// хотя возможно ретрай и так есть в пабсаб библе для nats или kafka
-			if err := c.Pubsub.Publish(ctx, topic, msg); err != nil {
-				return err
-			}
-			logger.Info("fail events sent to all topics")
-		}
+	routing := stp.GetRouting()
+	if len(routing.ErrorTopics) == 0 {
+		logger.Info("no error topics configured, skipping failure notification")
 		return nil
 	}
-	logger.Info("no any topics to send fail event")
-	// если нет топиков для failed то ничего никуда не шлем
+
+	for _, topic := range routing.ErrorTopics {
+		if err := c.Pubsub.Publish(ctx, topic, msg); err != nil {
+			return fmt.Errorf("failed to publish to topic %s: %w", topic, err)
+		}
+	}
+	logger.Info("failure events sent to all error topics")
 	return nil
 }
 
 func (c *Controller) sendNextToExecute(ctx context.Context, stp step.Step, msg message.Message) error {
-	var (
-		routing step.RoutingConfig
-	)
-
-	routing = stp.GetRouting()
-	if routing.NextStepTopics != nil {
-		for _, topic := range routing.NextStepTopics {
-			msg.MessageType = message.EventTypeComplete
-			// тут нужен декоратор с ретраем для Publish обязательно
-			if err := c.Pubsub.Publish(ctx, topic, msg); err != nil {
-				return err
-			}
-		}
-		logger.Info("complete messages sent to all topics")
+	routing := stp.GetRouting()
+	if len(routing.NextStepTopics) == 0 {
+		logger.Info("no next step topics configured")
 		return nil
 	}
-	logger.Info("no any next topics to send complete event")
-	// если нет топиков для complete - ничего не отправляем
+
+	for _, topic := range routing.NextStepTopics {
+		if err := c.Pubsub.Publish(ctx, topic, msg); err != nil {
+			return fmt.Errorf("failed to publish to topic %s: %w", topic, err)
+		}
+	}
+	logger.Info("complete messages sent to all next step topics")
 	return nil
 }
 
-func (c *Controller) compensateAction(step step.Step, msg message.Message) error {
+func (c *Controller) compensateAction(ctx context.Context, stp step.Step, msg message.Message) error {
+	compensationMsg, err := stp.OnFail(ctx, msg)
+	if err != nil {
+		return c.handleCompensateError(ctx, stp, msg, err)
+	}
+
+	return c.sendCompensationSuccess(ctx, stp, compensationMsg)
+}
+
+func (c *Controller) handleCompensateError(ctx context.Context, stp step.Step, msg message.Message, err error) error {
+	errHandler := stp.GetOnCompensateError()
+	if errHandler == nil {
+		logger.Warnf("compensation failed and no error handler configured, sagaID: %s", msg.SagaID)
+		return fmt.Errorf("compensation failed: %w", err)
+	}
+
+	recoveryMsg, recoveryErr := errHandler(ctx, msg, err)
+	if recoveryErr != nil {
+		logger.Warnf("compensation error handler failed, sagaID: %s", msg.SagaID)
+		return fmt.Errorf("compensation error handler failed: %w", recoveryErr)
+	}
+
+	logger.Info("compensation error handler succeeded, continuing compensation")
+	return c.sendCompensationSuccess(ctx, stp, recoveryMsg)
+}
+
+func (c *Controller) sendCompensationSuccess(ctx context.Context, stp step.Step, msg message.Message) error {
+	routing := stp.GetRouting()
+	if len(routing.ErrorTopics) == 0 {
+		logger.Info("no error topics configured for compensation propagation")
+		return nil
+	}
+
+	msg.MessageType = message.EventTypeFailed
+	for _, topic := range routing.ErrorTopics {
+		if err := c.Pubsub.Publish(ctx, topic, msg); err != nil {
+			return fmt.Errorf("failed to publish compensation to topic %s: %w", topic, err)
+		}
+	}
+	logger.Info("compensation messages sent to all error topics")
 	return nil
+}
+
+func (c *Controller) StartSaga(ctx context.Context, stp step.Step, msg message.Message) error {
+	sagaID, err := c.generateSagaIDByUUIDV7()
+	if err != nil {
+		logger.Warn("error occured generating saga ID")
+		return fmt.Errorf("failed to generate saga id: %w", err)
+	}
+
+	msg.SagaID = sagaID
+	msg.FromStep = stp.Name()
+	msg.MessageType = message.EventTypeComplete
+
+	return c.executeAction(ctx, stp, msg)
 }
 
 // блин, нужно как-то придумать, как сделать что-то типа

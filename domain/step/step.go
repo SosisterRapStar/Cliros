@@ -36,7 +36,8 @@ type StepParams struct {
 	Compensate Action
 	Routing    RoutingConfig
 	// RetryPolicy *RetryPolicy
-	OnError ErrorHandler
+	OnError           ErrorHandler
+	OnCompensateError ErrorHandler
 }
 
 type Step struct {
@@ -45,7 +46,9 @@ type Step struct {
 	compensate Action
 	routing    RoutingConfig
 	// пользователь должен сформировать правильное сообщение для другого сервиса, дать ему контекст, чтобы тот откатился или что-то сделал
-	onError ErrorHandler
+
+	onError           ErrorHandler
+	onCompensateError ErrorHandler
 	// retryPolicy *RetryPolicy
 }
 
@@ -57,11 +60,12 @@ func New(p StepParams) (Step, error) {
 	}
 
 	return Step{
-		name:       p.Name,
-		execute:    p.Execute,
-		compensate: p.Compensate,
-		routing:    p.Routing,
-		onError:    p.OnError,
+		name:              p.Name,
+		execute:           p.Execute,
+		compensate:        p.Compensate,
+		routing:           p.Routing,
+		onError:           p.OnError,
+		onCompensateError: p.OnCompensateError,
 	}, nil
 }
 
@@ -93,6 +97,10 @@ func (s Step) OnFail(ctx context.Context, msg message.Message) (message.Message,
 
 func (s Step) GetOnError() ErrorHandler {
 	return s.onError
+}
+
+func (s Step) GetOnCompensateError() ErrorHandler {
+	return s.onCompensateError
 }
 
 // при получении сообщения, должны посмотреть на тип сообщения
