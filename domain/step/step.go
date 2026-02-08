@@ -23,6 +23,7 @@ import (
 type Action func(ctx context.Context, msg message.Message) (message.Message, error)
 
 // здесь можно указать логику, что делать при ошибке, если нужно например сделать retry действия, а не сразу откатить транзакцию
+// пользователь может взять ошибку из err и посмотреть
 type ErrorHandler func(ctx context.Context, msg message.Message, err error) (message.Message, error)
 
 type IDFunc func() string

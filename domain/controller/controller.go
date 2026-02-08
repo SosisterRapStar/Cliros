@@ -17,6 +17,11 @@ import (
 
 // наверное это нужно делать в Step
 // пусть описание топиков для отката и топиков для следующих действий будет не в контроллере, а step
+type Saga interface {
+	Register(string, step.Step)
+	StartSaga(context.Context, step.Step, message.Message)
+}
+
 type Controller struct {
 	Pubsub broker.Pubsub
 }
@@ -30,11 +35,11 @@ type Controller struct {
 // вообще как будто мы должны регистровать не шаг, а execute или compensate, то есть сами функции
 // то есть пусть step
 // нам нужно сейчас как-то получить
+// здесь нужно убрать, topic
 func (c *Controller) Register(topic string, step step.Step) {
 	var (
 		ctx context.Context = context.Background()
 	)
-	// блять нужно что-то решить с контекстами иначе хуета тут будет полная нахуй
 	c.Pubsub.Subscribe(ctx, topic, func(ctx context.Context, msg message.Message) error {
 		var (
 			sagaID   string = msg.GetSagaID()
@@ -76,8 +81,6 @@ func (c *Controller) generateSagaIDByUUIDV7() (string, error) {
 }
 
 func (c *Controller) executeAction(ctx context.Context, stp step.Step, msg message.Message) error {
-	// ctx := context.Background() и вот хуй же пойми чо тут с контекстом нахуй делать
-
 	newMsg, err := stp.Execute(ctx, msg)
 	if err != nil {
 		return c.handleExecuteError(ctx, stp, msg, err)
@@ -209,18 +212,3 @@ func (c *Controller) StartSaga(ctx context.Context, stp step.Step, msg message.M
 
 	return c.executeAction(ctx, stp, msg)
 }
-
-// блин, нужно как-то придумать, как сделать что-то типа
-
-// нужна какая-то функция типа execute
-
-// сначала нужно разобраться, где будет логика посыла сообщения следующему сервису
-
-// как будем публиковать, нам нужен pubsub еще и в самом step
-// тогда нужно проки
-
-// сейщас проблема в том, что у нас компенсация и регистрация идут в одном и том же шаге, то есть
-
-// пользователь должен зарегестировать как
-
-// пользователь по идее создает шаг и вешает шаги на топики

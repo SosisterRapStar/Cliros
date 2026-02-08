@@ -6,11 +6,10 @@ import (
 )
 
 type Message struct {
-	MessageType MessageType `json:"type"`
-	FromStep    string      `json:"from"`
-	SagaID      string      `json:"saga_id"`
-	// StepName string         `json:"step_name"`
-	Payload map[string]any `json:"payload"`
+	MessageType MessageType    `json:"type"`
+	FromStep    string         `json:"from"`
+	SagaID      string         `json:"saga_id"`
+	Payload     map[string]any `json:"payload"`
 }
 
 var validTypes = []MessageType{
