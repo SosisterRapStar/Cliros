@@ -12,6 +12,7 @@ var (
 		scheduled_at 	TIMESTAMP,
 		metadata 		BYTEA,
 		payload 		BYTEA NOT NULL,
+		last_attempt    TIMESTAMP,
 		processed_at 	TIMESTAMP,
 		
 		PRIMARY KEY (saga_id, step_name)

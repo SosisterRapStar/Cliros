@@ -5,12 +5,22 @@ import (
 	"slices"
 )
 
-type Message struct {
-	MessageType MessageType    `json:"type"`
-	FromStep    string         `json:"from"`
-	SagaID      string         `json:"saga_id"`
-	Payload     map[string]any `json:"payload"`
-}
+type (
+	MessageMeta struct {
+		MessageType MessageType `json:"type"`
+		FromStep    string      `json:"from"`
+		SagaID      string      `json:"saga_id"`
+	}
+
+	MessagePayload struct {
+		Payload map[string]any `json:"payload"`
+	}
+
+	Message struct {
+		MessageMeta
+		MessagePayload
+	}
+)
 
 var validTypes = []MessageType{
 	EventTypeComplete,
