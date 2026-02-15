@@ -12,6 +12,7 @@ var (
 		scheduled_at 	TIMESTAMP,
 		metadata 		BYTEA,
 		payload 		BYTEA NOT NULL,
+		attempts_counter INTEGER DEFAULT 0,
 		last_attempt    TIMESTAMP,
 		processed_at 	TIMESTAMP,
 		

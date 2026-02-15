@@ -3,12 +3,14 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/SosisterRapStar/LETI-paper/domain/broker"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
+	"github.com/SosisterRapStar/LETI-paper/thirdparty/backoff"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -22,33 +24,45 @@ SELECT
 	, scheduled_at
 	, metadata
 	, payload
+	, attempts_counter
 	, last_attempt
 	, processed_at
 FROM saga.outbox
-	WHERE scheduled_at <= TIMESTAMP::NOW()
+	WHERE scheduled_at <= NOW() AND processed_at IS NULL
 	ORDER BY created_at ASC 
-	LIMIT $3
+	LIMIT $1
 `
 
-var updateOutboxQuery = `
+var updateOutboxQueryOnErr = `
 UPDATE saga.outbox
 SET 
+	attempt_counter = attempt_counter + 1,
     last_attempt = $3,
     scheduled_at = $4
 WHERE 
     saga_id = $1 
     AND step_name = $2;
 	`
+var updateOutboxQueryOnSuccess = `
+	UPDATE saga.outbox
+	SET 
+		processed_at = $3
+	WHERE 
+		saga_id = $1 
+		AND step_name = $2;
+		`
 
 type OutboxMessage struct {
-	SagaID      uuid.UUID
-	StepName    string
-	Topic       string
-	CreatedAt   time.Time
-	ScheduledAt time.Time
-	Metadata    []byte
-	Payload     []byte
-	ProcessedAt time.Time
+	SagaID         uuid.UUID
+	StepName       string
+	Topic          string
+	CreatedAt      time.Time
+	ScheduledAt    time.Time
+	Metadata       []byte
+	Payload        []byte
+	AttemptCounter uint
+	LastAttempt    *time.Time
+	ProcessedAt    *time.Time
 }
 
 const (
@@ -56,18 +70,28 @@ const (
 	defaultBatchSize = 10
 )
 
+// Настройки бэкоффа, решает, на какое время запланировать ретрай сообщения
+type BackoffSettings struct {
+	backoffPolicy backoff.BackoffPolicy
+	backoffMin    time.Duration
+	backoffMax    time.Duration
+}
+
+// Настройки поллера, решает как часто будут политься сообщения и сколько сообщений будет вычитано
 type PollingSettings struct {
 	// Интервал через который ходим в базку
 	interval time.Duration
 	// Размер батча, который вытаскиваем из базы
 	batchSize int
+	// Политика с которой будет выбираться следующее время попытки отдачи сообщения
 }
 
 type Reader struct {
 	// Объект паблишера, через который публикуем сообщения
-	Publisher broker.Pubsub
-	// Настройкри поллера
+	Publisher broker.Publisher
+	// Настройки и опции
 	PollingSettings PollingSettings
+	BackoffSettings BackoffSettings
 	// Потом переделаем на собственную абстракцию
 	pool *pgxpool.Pool
 
@@ -94,6 +118,21 @@ type ReaderParams struct {
 	BatchSize *int
 }
 
+func NewBackoffSettings(p backoff.BackoffPolicy, minB, maxB time.Duration) BackoffSettings {
+	return BackoffSettings{
+		backoffPolicy: p,
+		backoffMin:    minB,
+		backoffMax:    maxB,
+	}
+}
+
+func NewPollingSettings(interval time.Duration, batchSize int) PollingSettings {
+	return PollingSettings{
+		interval:  interval,
+		batchSize: batchSize,
+	}
+}
+
 func (r *Reader) NewReader(rp ReaderParams) *Reader {
 	// это пока не доделано
 	var (
@@ -109,63 +148,150 @@ func (r *Reader) NewReader(rp ReaderParams) *Reader {
 	return &reader
 }
 
-func (r *Reader) IsStarted() int32 {
-	// нужно подумать над mutex здесь
-	return r.started
+func (r *Reader) IsStarted() bool {
+	return atomic.LoadInt32(&r.started) == 1
 }
 
-func NewPollingSettings(interval time.Duration, batchSize int) PollingSettings {
-	return PollingSettings{
-		interval:  interval,
-		batchSize: batchSize,
+func (r *Reader) IsClosed() bool {
+	return atomic.LoadInt32(&r.closed) == 1
+}
+
+func (r *Reader) Start(userCtx context.Context) {
+	if atomic.LoadInt32(&r.closed) == 1 {
+		return
 	}
-}
-
-func (r *Reader) start(userCtx context.Context) {
 	if !atomic.CompareAndSwapInt32(&r.started, 0, 1) {
 		return
 	}
+	r.wg.Go(
+		func() {
+			r.polling(userCtx)
+		},
+	)
+}
 
+func (r *Reader) Close() {
+	if !atomic.CompareAndSwapInt32(&r.closed, 0, 1) {
+		return
+	}
+	r.cancelCtx()
+}
+
+func (r *Reader) polling(userCtx context.Context) {
 	ticker := time.NewTicker(r.PollingSettings.interval)
 	defer ticker.Stop()
 	for {
 		select {
+		// если закрыли ридер
 		case <-r.closeCtx.Done():
 			return
+
+		// если юзер ctx отработал
 		case <-userCtx.Done():
 			return
-		case <-ticker.C:
-			err := r.scanBatch(ctx)
-			if err != nil {
 
+		// TODO: такая логика тут как-будто не подходит
+		// TODO: в будущем заменить такую логику на другую
+		// мы должны опираться на то с какой скоростью отработает функция вычитки
+		// если что-то пойдет не так и будет отправлять или читать сообщения долго
+		// то тикер захочет сложить 2 тика в канал и таким образом после обработки сообщений
+		// сразу подхватим следующий тик - а мы бы хотели подождать время следующего полла, без учитывания походов в бд и кафку
+		case <-ticker.C:
+			readed, err := r.scanBatch(userCtx)
+			if err != nil {
+				r.sendError(fmt.Errorf("outbox scan batch: %w", err))
+			}
+			for i := 0; i < readed; i++ {
+				r.processMessage(userCtx, r.buffer[i])
 			}
 		}
 	}
 }
 
-func (r *Reader) Close() {
-	r.cancelCtx()
-
+// sendError неблокирующая отправка ошибки в канал ошибок.
+// Если канал заполнен — ошибка дропается, чтобы ридер не зависал.
+func (r *Reader) sendError(err error) {
+	select {
+	case r.errCh <- err:
+	default:
+	}
 }
 
-func (r *Reader) updateOutbox(ctx context.Context, attemptedAt time.Time, nextAttempt time.Time) error {
+func (r *Reader) processMessage(ctx context.Context, msg *OutboxMessage) {
+	sagaMsg := r.fromOutboxToSagaMessage(*msg)
+	// TODO: нужно добавить свои собственные ошибки, чтобы как-то различать,
+	// какие ошибки пришли от паблишера и связаны ли они вообще с сообщениями
+	// обязательно их логировать
+	if err := r.Publisher.Publish(ctx, msg.Topic, sagaMsg); err != nil {
+		r.sendError(fmt.Errorf("outbox publish [saga_id=%s, step=%s]: %w", msg.SagaID, msg.StepName, err))
+		r.handlePublishError(ctx, msg)
+		return
+	}
+	r.handlePublishSuccess(ctx, msg)
+}
+
+func (r *Reader) handlePublishError(ctx context.Context, msg *OutboxMessage) {
+	attemptTime := time.Now()
+	nextAttempt := r.calculateNextAttempt(msg)
+	if err := r.updateOutboxOnErr(ctx, msg, attemptTime, nextAttempt); err != nil {
+		r.sendError(fmt.Errorf("outbox update on error [saga_id=%s, step=%s]: %w", msg.SagaID, msg.StepName, err))
+	}
+}
+
+func (r *Reader) handlePublishSuccess(ctx context.Context, msg *OutboxMessage) {
+	if err := r.updateOutboxOnSuccess(ctx, msg, time.Now()); err != nil {
+		r.sendError(fmt.Errorf("outbox update on success [saga_id=%s, step=%s]: %w", msg.SagaID, msg.StepName, err))
+	}
+}
+
+func (r *Reader) calculateNextAttempt(msg *OutboxMessage) time.Time {
+	backoffDuration := r.BackoffSettings.backoffPolicy.CalcBackoff(
+		msg.AttemptCounter,
+		r.BackoffSettings.backoffMin,
+		r.BackoffSettings.backoffMax,
+	)
+	return time.Now().Add(backoffDuration)
+}
+
+func (r *Reader) updateOutboxOnSuccess(
+	ctx context.Context,
+	msg *OutboxMessage,
+	processedAt time.Time) error {
 	tx, err := r.pool.Begin(ctx)
 	defer tx.Rollback(ctx)
 	if err != nil {
 		return err
 	}
-	tx.Exec(ctx)
+	_, err = tx.Exec(ctx, updateOutboxQueryOnSuccess, msg.SagaID, msg.StepName, processedAt)
+	if err != nil {
+		return err
+	}
+	err = tx.Commit(ctx)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
-func (r *Reader) publish(ctx context.Context, counter int) {
-	for i := 0; i < counter; i++ {
-		msg := r.buffer[i]
-		topic := msg.Topic
-		sagaMsg := r.fromOutboxToSagaMessage(*msg)
-		if err := r.Publisher.Publish(ctx, topic, sagaMsg); err != nil {
-
-		}
+func (r *Reader) updateOutboxOnErr(
+	ctx context.Context,
+	msg *OutboxMessage,
+	lastAttempt time.Time,
+	nextAttempt time.Time) error {
+	tx, err := r.pool.Begin(ctx)
+	defer tx.Rollback(ctx)
+	if err != nil {
+		return err
 	}
+	_, err = tx.Exec(ctx, updateOutboxQueryOnErr, msg.SagaID, msg.StepName, lastAttempt, nextAttempt)
+	if err != nil {
+		return err
+	}
+	err = tx.Commit(ctx)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *Reader) fromOutboxToSagaMessage(oMsg OutboxMessage) message.Message {
@@ -191,7 +317,7 @@ func (r *Reader) scanBatch(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	rows, err := conn.Query(ctx, batchQuery)
+	rows, err := conn.Query(ctx, batchQuery, r.PollingSettings.batchSize)
 	if err != nil {
 		return 0, err
 	}
@@ -199,14 +325,17 @@ func (r *Reader) scanBatch(ctx context.Context) (int, error) {
 
 	for rows.Next() {
 		om := r.buffer[rowsCounter]
-		rows.Scan(om.SagaID,
-			om.StepName,
-			om.Topic,
-			om.CreatedAt,
-			om.ScheduledAt,
-			om.Metadata,
-			om.Payload,
-			om.ProcessedAt,
+		rows.Scan(
+			&om.SagaID,
+			&om.StepName,
+			&om.Topic,
+			&om.CreatedAt,
+			&om.ScheduledAt,
+			&om.Metadata,
+			&om.Payload,
+			&om.AttemptCounter,
+			&om.LastAttempt,
+			&om.ProcessedAt,
 		)
 		rowsCounter++
 	}
