@@ -8,44 +8,33 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/SosisterRapStar/LETI-paper/domain/broker"
+	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
+	"github.com/SosisterRapStar/LETI-paper/domain/outbox"
 	"github.com/SosisterRapStar/LETI-paper/domain/step"
 )
 
-// пользователь должен указать pubsub и еще должен указать, какие топики что делают
-// то есть какие в какие топики пользователь должен отправить сообщение после обработки текущего
-// пока что укажем описание топиков -, которые
-
-// наверное это нужно делать в Step
-// пусть описание топиков для отката и топиков для следующих действий будет не в контроллере, а step
 type Saga interface {
 	Register(string, *step.Step) error
 	StartSaga(context.Context, *step.Step, message.Message) error
 }
 
+// Controller управляет шагами саги.
+// Pubsub используется для подписки на входящие сообщения.
+// Writer + DBCtx обеспечивают атомарную запись бизнес-логики и outbox-сообщений в одной транзакции.
+// Reader вычитывает outbox и публикует сообщения в брокер.
 type Controller struct {
-	Pubsub broker.Pubsub
+	Pubsub broker.Subsciber
+	Writer *outbox.Writer
+	DBCtx  *databases.DBContext
 }
 
-// как пользователь будет передавать переменные из своей функции в Message Payload
-// то есть как пользователь будет передавать
-// пусть в Step будет возврат сообщений
-
-// короче у нас 1 топик, как для выполенения транзакций, так и для компенсации транзакций, получается, что мы
-// определяем - что делать по типу сообщений
-// вообще как будто мы должны регистровать не шаг, а execute или compensate, то есть сами функции
-// то есть пусть step
-// нам нужно сейчас как-то получить
-// здесь нужно убрать, topic
-func (c *Controller) Register(topic string, step *step.Step) error {
-	var (
-		ctx = context.Background()
-	)
+// Register подписывается на топик и направляет входящие сообщения в соответствующий шаг.
+func (c *Controller) Register(topic string, stp *step.Step) error {
+	ctx := context.Background()
 	return c.Pubsub.Subscribe(ctx, topic, func(ctx context.Context, msg message.Message) error {
-		var (
-			sagaID   = msg.GetSagaID()
-			stepName = msg.FromStep
-		)
+		sagaID := msg.GetSagaID()
+		stepName := msg.FromStep
 
 		logger.Info("got message from step: %s", stepName)
 		logger.Info("during saga: %s", sagaID)
@@ -57,12 +46,12 @@ func (c *Controller) Register(topic string, step *step.Step) error {
 
 		switch msgType {
 		case message.EventTypeComplete:
-			if err := c.executeAction(ctx, step, msg); err != nil {
+			if err := c.executeAction(ctx, stp, msg); err != nil {
 				logger.Warnf("error occurred: %s", err.Error())
 				return err
 			}
 		case message.EventTypeFailed:
-			if err := c.compensateAction(ctx, step, msg); err != nil {
+			if err := c.compensateAction(ctx, stp, msg); err != nil {
 				logger.Warnf("error occurred: %s", err.Error())
 				return err
 			}
@@ -74,132 +63,190 @@ func (c *Controller) Register(topic string, step *step.Step) error {
 }
 
 func (c *Controller) generateSagaIDByUUIDV7() (string, error) {
-	uuid, err := uuid.NewV7()
+	id, err := uuid.NewV7()
 	if err != nil {
 		return "", err
 	}
-	return uuid.String(), nil
+	return id.String(), nil
 }
 
+// executeAction выполняет шаг саги внутри managed-транзакции:
+// 1. Begin TX
+// 2. stp.Execute(ctx, tx, msg) -- пользовательская бизнес-логика
+// 3. Writer.WriteMessages -- запись в outbox в той же TX
+// 4. Commit
 func (c *Controller) executeAction(ctx context.Context, stp *step.Step, msg message.Message) error {
-	newMsg, err := stp.Execute(ctx, msg)
+	tx, err := c.DBCtx.DB().BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = tx.Rollback() //nolint:errcheck
+		}
+	}()
+
+	newMsg, err := stp.Execute(ctx, tx, msg)
+	if err != nil {
+		// Execute failed -- rollback business tx, handle error separately
+		_ = tx.Rollback() //nolint:errcheck
+		committed = true  // prevent double rollback in defer
 		return c.handleExecuteError(ctx, stp, msg, err)
 	}
 
-	return c.sendSuccessMessage(ctx, stp, newMsg)
-}
+	// Write success outbox messages in the same tx
+	newMsg.MessageType = message.EventTypeComplete
+	newMsg.SagaID = msg.SagaID
+	newMsg.FromStep = stp.Name()
 
-func (c *Controller) handleExecuteError(ctx context.Context, stp *step.Step, msg message.Message, err error) error {
-	errHandler := stp.GetOnError()
-	if errHandler == nil {
-		return c.sendFailureMessage(ctx, stp, msg)
+	routing := stp.GetRouting()
+	if len(routing.NextStepTopics) > 0 {
+		if err := c.Writer.WriteMessages(ctx, newMsg, tx, routing.NextStepTopics, stp.Name()); err != nil {
+			return fmt.Errorf("outbox write next steps: %w", err)
+		}
 	}
 
-	recoveryMsg, recoveryErr := errHandler(ctx, msg, err)
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	committed = true
+
+	logger.Info("execute action committed, messages written to outbox")
+	return nil
+}
+
+// handleExecuteError обрабатывает ошибку выполнения шага.
+// Если есть ErrorHandler, вызывает его. Результат записывается в outbox через отдельную TX.
+func (c *Controller) handleExecuteError(ctx context.Context, stp *step.Step, msg message.Message, execErr error) error {
+	errHandler := stp.GetOnError()
+	if errHandler == nil {
+		return c.writeFailureToOutbox(ctx, stp, msg)
+	}
+
+	recoveryMsg, recoveryErr := errHandler(ctx, msg, execErr)
 	if recoveryErr != nil {
 		logger.Info("error handler failed, sending failure event")
-		return c.sendFailureMessage(ctx, stp, recoveryMsg)
+		return c.writeFailureToOutbox(ctx, stp, recoveryMsg)
 	}
 
 	logger.Info("error handler succeeded, continuing saga")
-	return c.sendSuccessMessage(ctx, stp, recoveryMsg)
+	return c.writeSuccessToOutbox(ctx, stp, recoveryMsg)
 }
 
-func (c *Controller) sendSuccessMessage(ctx context.Context, stp *step.Step, msg message.Message) error {
-	msg.MessageType = message.EventTypeComplete
-	if err := c.sendNextToExecute(ctx, stp, msg); err != nil {
-		logger.Warnf("failed to send complete event to next services, sagaID: %s", msg.SagaID)
-		return fmt.Errorf("saga execution failed: %w", err)
-	}
-	return nil
-}
-
-func (c *Controller) sendFailureMessage(ctx context.Context, stp *step.Step, msg message.Message) error {
-	msg.MessageType = message.EventTypeFailed
-	if err := c.sendOnFail(ctx, stp, msg); err != nil {
-		logger.Warnf("failed to send failure event, sagaID: %s", msg.SagaID)
-		return fmt.Errorf("saga failure notification failed: %w", err)
-	}
-	logger.Info("failure event sent to previous services")
-	return nil
-}
-
-func (c *Controller) sendOnFail(ctx context.Context, stp *step.Step, msg message.Message) error {
-	routing := stp.GetRouting()
-	if len(routing.ErrorTopics) == 0 {
-		logger.Info("no error topics configured, skipping failure notification")
-		return nil
-	}
-
-	for _, topic := range routing.ErrorTopics {
-		if err := c.Pubsub.Publish(ctx, topic, msg); err != nil {
-			return fmt.Errorf("failed to publish to topic %s: %w", topic, err)
-		}
-	}
-	logger.Info("failure events sent to all error topics")
-	return nil
-}
-
-func (c *Controller) sendNextToExecute(ctx context.Context, stp *step.Step, msg message.Message) error {
-	routing := stp.GetRouting()
-	if len(routing.NextStepTopics) == 0 {
-		logger.Info("no next step topics configured")
-		return nil
-	}
-
-	for _, topic := range routing.NextStepTopics {
-		if err := c.Pubsub.Publish(ctx, topic, msg); err != nil {
-			return fmt.Errorf("failed to publish to topic %s: %w", topic, err)
-		}
-	}
-	logger.Info("complete messages sent to all next step topics")
-	return nil
-}
-
+// compensateAction выполняет компенсацию внутри managed-транзакции.
 func (c *Controller) compensateAction(ctx context.Context, stp *step.Step, msg message.Message) error {
-	compensationMsg, err := stp.OnFail(ctx, msg)
+	tx, err := c.DBCtx.DB().BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = tx.Rollback() //nolint:errcheck
+		}
+	}()
+
+	compensationMsg, err := stp.OnFail(ctx, tx, msg)
+	if err != nil {
+		_ = tx.Rollback() //nolint:errcheck
+		committed = true
 		return c.handleCompensateError(ctx, stp, msg, err)
 	}
 
-	return c.sendCompensationSuccess(ctx, stp, compensationMsg)
+	// Propagate failure to previous steps via outbox
+	compensationMsg.MessageType = message.EventTypeFailed
+	compensationMsg.SagaID = msg.SagaID
+	compensationMsg.FromStep = stp.Name()
+
+	routing := stp.GetRouting()
+	if len(routing.ErrorTopics) > 0 {
+		if err := c.Writer.WriteMessages(ctx, compensationMsg, tx, routing.ErrorTopics, stp.Name()); err != nil {
+			return fmt.Errorf("outbox write compensation: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit compensation tx: %w", err)
+	}
+	committed = true
+
+	logger.Info("compensation committed, messages written to outbox")
+	return nil
 }
 
-func (c *Controller) handleCompensateError(ctx context.Context, stp *step.Step, msg message.Message, err error) error {
+// handleCompensateError обрабатывает ошибку компенсации.
+func (c *Controller) handleCompensateError(ctx context.Context, stp *step.Step, msg message.Message, compErr error) error {
 	errHandler := stp.GetOnCompensateError()
 	if errHandler == nil {
 		logger.Warnf("compensation failed and no error handler configured, sagaID: %s", msg.SagaID)
-		return fmt.Errorf("compensation failed: %w", err)
+		return fmt.Errorf("compensation failed: %w", compErr)
 	}
 
-	recoveryMsg, recoveryErr := errHandler(ctx, msg, err)
+	recoveryMsg, recoveryErr := errHandler(ctx, msg, compErr)
 	if recoveryErr != nil {
 		logger.Warnf("compensation error handler failed, sagaID: %s", msg.SagaID)
 		return fmt.Errorf("compensation error handler failed: %w", recoveryErr)
 	}
 
 	logger.Info("compensation error handler succeeded, continuing compensation")
-	return c.sendCompensationSuccess(ctx, stp, recoveryMsg)
+	return c.writeCompensationToOutbox(ctx, stp, recoveryMsg)
 }
 
-func (c *Controller) sendCompensationSuccess(ctx context.Context, stp *step.Step, msg message.Message) error {
+// writeSuccessToOutbox записывает success-сообщение в outbox через отдельную транзакцию.
+func (c *Controller) writeSuccessToOutbox(ctx context.Context, stp *step.Step, msg message.Message) error {
+	msg.MessageType = message.EventTypeComplete
+	msg.FromStep = stp.Name()
+
+	routing := stp.GetRouting()
+	if len(routing.NextStepTopics) == 0 {
+		logger.Info("no next step topics configured")
+		return nil
+	}
+
+	return c.Writer.WriteTx(ctx, msg, routing.NextStepTopics, stp.Name(), nil)
+}
+
+// writeFailureToOutbox записывает failure-сообщение в outbox через отдельную транзакцию.
+func (c *Controller) writeFailureToOutbox(ctx context.Context, stp *step.Step, msg message.Message) error {
+	msg.MessageType = message.EventTypeFailed
+	msg.FromStep = stp.Name()
+
+	routing := stp.GetRouting()
+	if len(routing.ErrorTopics) == 0 {
+		logger.Info("no error topics configured, skipping failure notification")
+		return nil
+	}
+
+	if err := c.Writer.WriteTx(ctx, msg, routing.ErrorTopics, stp.Name(), nil); err != nil {
+		logger.Warnf("failed to write failure to outbox, sagaID: %s", msg.SagaID)
+		return fmt.Errorf("saga failure notification failed: %w", err)
+	}
+	logger.Info("failure event written to outbox")
+	return nil
+}
+
+// writeCompensationToOutbox записывает compensation-сообщение в outbox.
+func (c *Controller) writeCompensationToOutbox(ctx context.Context, stp *step.Step, msg message.Message) error {
+	msg.MessageType = message.EventTypeFailed
+	msg.FromStep = stp.Name()
+
 	routing := stp.GetRouting()
 	if len(routing.ErrorTopics) == 0 {
 		logger.Info("no error topics configured for compensation propagation")
 		return nil
 	}
 
-	msg.MessageType = message.EventTypeFailed
-	for _, topic := range routing.ErrorTopics {
-		if err := c.Pubsub.Publish(ctx, topic, msg); err != nil {
-			return fmt.Errorf("failed to publish compensation to topic %s: %w", topic, err)
-		}
+	if err := c.Writer.WriteTx(ctx, msg, routing.ErrorTopics, stp.Name(), nil); err != nil {
+		return fmt.Errorf("failed to write compensation to outbox: %w", err)
 	}
-	logger.Info("compensation messages sent to all error topics")
+	logger.Info("compensation messages written to outbox")
 	return nil
 }
 
+// StartSaga инициирует новую сагу: генерирует sagaID и запускает первый шаг.
 func (c *Controller) StartSaga(ctx context.Context, stp *step.Step, msg message.Message) error {
 	sagaID, err := c.generateSagaIDByUUIDV7()
 	if err != nil {

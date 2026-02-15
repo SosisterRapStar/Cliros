@@ -4,33 +4,20 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 )
 
-// нам нужна точка входа для создание саги
-// какая-то такая хуета при которой мы понимаем, что создали сагу и вот id ей присвоили
-// может быть и такое, что мы не создали сагу, а являемся одним из сервисов, который должен выполнить транзакцию
-// поэтому id саги получим оттуда
-// нужно дать пользователю возможность самому формировать id саги
+// Action -- пользовательский хэндлер для выполнения или компенсации шага саги.
+// tx -- транзакция, в которой выполняется бизнес-логика и запись в outbox атомарно.
+type Action func(ctx context.Context, tx databases.TxQueryer, msg message.Message) (message.Message, error)
 
-// желательно отслеживать id шага или дать шагу имя
-// const (
-// 	name   = "name"
-// 	sagaID = "sagaID"
-// )
-
-// это типа хэндлер, сюда челбикс будет писать, что ему нужно для логики
-type Action func(ctx context.Context, msg message.Message) (message.Message, error)
-
-// здесь можно указать логику, что делать при ошибке, если нужно например сделать retry действия, а не сразу откатить транзакцию
-// пользователь может взять ошибку из err и посмотреть
+// ErrorHandler -- обработчик ошибок, вызывается при падении Execute или Compensate.
+// Позволяет пользователю решить, что делать с ошибкой (retry, transform, etc).
 type ErrorHandler func(ctx context.Context, msg message.Message, err error) (message.Message, error)
 
 type IDFunc func() string
 
-// обязательно подумать о том, что нам нужно хранить локальные метаданные для каждой саги и что это очень обязательно
-// то есть каждый step, должен хранить о себе данные
-// пусть будем хранить данные так: saga_id + step_id
 type StepParams struct {
 	Name       string
 	Execute    Action
@@ -46,14 +33,11 @@ type Step struct {
 	execute    Action
 	compensate Action
 	routing    RoutingConfig
-	// пользователь должен сформировать правильное сообщение для другого сервиса, дать ему контекст, чтобы тот откатился или что-то сделал
 
 	onError           ErrorHandler
 	onCompensateError ErrorHandler
 	// retryPolicy *RetryPolicy
 }
-
-// проблема в том, что мы можем сделать компенсацию как для нашего шага, так сделать onCompensate для шага execute
 
 func New(p *StepParams) (*Step, error) {
 	if p.Name == "" {
@@ -85,15 +69,14 @@ func (s *Step) GetRouting() RoutingConfig {
 	return s.routing
 }
 
-// не знаю зачем я сделал такую логику тупую, типа нахуя, можно же просто вызывать s.execute
-// но я почему-то не могу так сделать, что-то внутри хочет сделать этот ебанный полугеттер полухуй
-func (s *Step) Execute(ctx context.Context, msg message.Message) (message.Message, error) {
-	return s.execute(ctx, msg)
+// Execute вызывает пользовательский хэндлер для выполнения шага.
+func (s *Step) Execute(ctx context.Context, tx databases.TxQueryer, msg message.Message) (message.Message, error) {
+	return s.execute(ctx, tx, msg)
 }
 
-// для повтора сделаем декоратор с повторами, но потом
-func (s *Step) OnFail(ctx context.Context, msg message.Message) (message.Message, error) {
-	return s.compensate(ctx, msg)
+// OnFail вызывает компенсирующее действие.
+func (s *Step) OnFail(ctx context.Context, tx databases.TxQueryer, msg message.Message) (message.Message, error) {
+	return s.compensate(ctx, tx, msg)
 }
 
 func (s *Step) GetOnError() ErrorHandler {

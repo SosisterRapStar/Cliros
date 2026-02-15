@@ -9,49 +9,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/SosisterRapStar/LETI-paper/domain/broker"
+	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/SosisterRapStar/LETI-paper/thirdparty/backoff"
 )
-
-var batchQuery = `
-SELECT 
-	saga_id
-	, step_name
-	, topic
-	, created_at
-	, scheduled_at
-	, metadata
-	, payload
-	, attempts_counter
-	, last_attempt
-	, processed_at
-FROM saga.outbox
-	WHERE scheduled_at <= NOW() AND processed_at IS NULL
-	ORDER BY created_at ASC 
-	LIMIT $1
-`
-
-var updateOutboxQueryOnErr = `
-UPDATE saga.outbox
-SET 
-	attempt_counter = attempt_counter + 1,
-    last_attempt = $3,
-    scheduled_at = $4
-WHERE 
-    saga_id = $1 
-    AND step_name = $2;
-	`
-var updateOutboxQueryOnSuccess = `
-	UPDATE saga.outbox
-	SET 
-		processed_at = $3
-	WHERE 
-		saga_id = $1 
-		AND step_name = $2;
-		`
 
 type OutboxMessage struct {
 	SagaID         uuid.UUID
@@ -84,7 +47,6 @@ type PollingSettings struct {
 	interval time.Duration
 	// Размер батча, который вытаскиваем из базы
 	batchSize int
-	// Политика с которой будет выбираться следующее время попытки отдачи сообщения
 }
 
 type Reader struct {
@@ -93,8 +55,8 @@ type Reader struct {
 	// Настройки и опции
 	PollingSettings PollingSettings
 	BackoffSettings BackoffSettings
-	// Потом переделаем на собственную абстракцию
-	pool *pgxpool.Pool
+	// Абстракция над базой данных
+	dbCtx *databases.DBContext
 
 	// переиспользуемый буффер для паршеных сообщений
 	// предпологается, что при рантайме приложения, на Reader будет выделяться только 1 горутина
@@ -134,19 +96,29 @@ func NewPollingSettings(interval time.Duration, batchSize int) PollingSettings {
 	}
 }
 
-func (r *Reader) NewReader(rp ReaderParams) *Reader {
-	// это пока не доделано
-	var (
-		buffer    []*OutboxMessage
-		reader    = Reader{}
+func NewReader(dbCtx *databases.DBContext, publisher broker.Publisher, polling PollingSettings, boff BackoffSettings, errCh chan<- error) *Reader {
+	batchSize := polling.batchSize
+	if batchSize <= 0 {
 		batchSize = defaultBatchSize
-	)
-	if rp.BatchSize != nil {
-		batchSize = *rp.BatchSize
 	}
-	buffer = make([]*OutboxMessage, batchSize)
-	reader.buffer = buffer
-	return &reader
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	buffer := make([]*OutboxMessage, batchSize)
+	for i := range buffer {
+		buffer[i] = &OutboxMessage{}
+	}
+
+	return &Reader{
+		Publisher:       publisher,
+		PollingSettings: polling,
+		BackoffSettings: boff,
+		dbCtx:           dbCtx,
+		buffer:          buffer,
+		closeCtx:        ctx,
+		cancelCtx:       cancel,
+		errCh:           errCh,
+	}
 }
 
 func (r *Reader) IsStarted() bool {
@@ -212,7 +184,6 @@ func (r *Reader) polling(userCtx context.Context) {
 }
 
 // sendError неблокирующая отправка ошибки в канал ошибок.
-// Если канал заполнен — ошибка дропается, чтобы ридер не зависал.
 func (r *Reader) sendError(err error) {
 	select {
 	case r.errCh <- err:
@@ -221,7 +192,7 @@ func (r *Reader) sendError(err error) {
 }
 
 func (r *Reader) processMessage(ctx context.Context, msg *OutboxMessage) error {
-	sagaMsg, err := r.fromOutboxToSagaMessage(msg)
+	sagaMsg, err := fromOutboxToSagaMessage(msg)
 	if err != nil {
 		return err
 	}
@@ -260,54 +231,94 @@ func (r *Reader) calculateNextAttempt(msg *OutboxMessage) time.Time {
 	return time.Now().Add(backoffDuration)
 }
 
+// buildBatchQuery строит SELECT-запрос для вычитки сообщений из outbox.
+func (r *Reader) buildBatchQuery() string {
+	p := r.dbCtx.GetSQLPlaceholder
+	return fmt.Sprintf(`
+SELECT 
+	saga_id, step_name, topic, created_at, scheduled_at,
+	metadata, payload, attempts_counter, last_attempt, processed_at
+FROM %s
+WHERE scheduled_at <= NOW() AND processed_at IS NULL
+ORDER BY created_at ASC 
+LIMIT %s`, "saga.outbox", p(1))
+}
+
+// buildUpdateOnErrQuery строит UPDATE-запрос при ошибке публикации.
+// args: $1=saga_id, $2=step_name, $3=last_attempt, $4=scheduled_at
+func (r *Reader) buildUpdateOnErrQuery() string {
+	p := r.dbCtx.GetSQLPlaceholder
+	return fmt.Sprintf(`
+UPDATE %s
+SET 
+	attempts_counter = attempts_counter + 1,
+	last_attempt = %s,
+	scheduled_at = %s
+WHERE 
+	saga_id = %s 
+	AND step_name = %s`,
+		"saga.outbox", p(3), p(4), p(1), p(2)) //nolint:mnd
+}
+
+// buildUpdateOnSuccessQuery строит UPDATE-запрос при успешной публикации.
+// args: $1=saga_id, $2=step_name, $3=processed_at
+func (r *Reader) buildUpdateOnSuccessQuery() string {
+	p := r.dbCtx.GetSQLPlaceholder
+	return fmt.Sprintf(`
+UPDATE %s
+SET 
+	processed_at = %s
+WHERE 
+	saga_id = %s 
+	AND step_name = %s`,
+		"saga.outbox", p(3), p(1), p(2)) //nolint:mnd
+}
+
 func (r *Reader) updateOutboxOnSuccess(
 	ctx context.Context,
 	msg *OutboxMessage,
-	processedAt time.Time) error {
-	tx, err := r.pool.Begin(ctx)
-	defer tx.Rollback(ctx) //nolint:errcheck
+	processedAt time.Time,
+) error {
+	tx, err := r.dbCtx.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, updateOutboxQueryOnSuccess, msg.SagaID, msg.StepName, processedAt)
+	defer tx.Rollback() //nolint:errcheck
+
+	query := r.buildUpdateOnSuccessQuery()
+	_, err = tx.ExecContext(ctx, query, msg.SagaID, msg.StepName, processedAt)
 	if err != nil {
 		return err
 	}
-	err = tx.Commit(ctx)
-	if err != nil {
-		return err
-	}
-	return nil
+	return tx.Commit()
 }
 
 func (r *Reader) updateOutboxOnErr(
 	ctx context.Context,
 	msg *OutboxMessage,
-	lastAttempt time.Time,
-	nextAttempt time.Time) error {
-	tx, err := r.pool.Begin(ctx)
-	defer tx.Rollback(ctx) //nolint:errcheck
+	lastAttempt, nextAttempt time.Time,
+) error {
+	tx, err := r.dbCtx.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, updateOutboxQueryOnErr, msg.SagaID, msg.StepName, lastAttempt, nextAttempt)
+	defer tx.Rollback() //nolint:errcheck
+
+	query := r.buildUpdateOnErrQuery()
+	_, err = tx.ExecContext(ctx, query, msg.SagaID, msg.StepName, lastAttempt, nextAttempt)
 	if err != nil {
 		return err
 	}
-	err = tx.Commit(ctx)
-	if err != nil {
-		return err
-	}
-	return nil
+	return tx.Commit()
 }
 
-func (r *Reader) fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, error) {
+func fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, error) {
 	var (
 		meta    message.MessageMeta
 		payload message.MessagePayload
 	)
 	meta.FromStep = oMsg.StepName
-	meta.SagaID = oMsg.StepName
+	meta.SagaID = oMsg.SagaID.String()
 	if err := json.Unmarshal(oMsg.Payload, &payload); err != nil {
 		return message.Message{}, err
 	}
@@ -319,14 +330,10 @@ func (r *Reader) fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, 
 }
 
 func (r *Reader) scanBatch(ctx context.Context) (int, error) {
-	var (
-		rowsCounter = 0
-	)
-	conn, err := r.pool.Acquire(ctx)
-	if err != nil {
-		return 0, err
-	}
-	rows, err := conn.Query(ctx, batchQuery, r.PollingSettings.batchSize)
+	rowsCounter := 0
+
+	query := r.buildBatchQuery()
+	rows, err := r.dbCtx.DB().QueryContext(ctx, query, r.PollingSettings.batchSize)
 	if err != nil {
 		return 0, err
 	}

@@ -7,28 +7,34 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
+	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 )
 
-var insertOutboxQuery = `
-INSERT INTO saga.outbox (
-	saga_id,
-	step_name,
-	topic,
-	created_at,
-	scheduled_at,
-	metadata,
-	payload
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
-`
+// TxWorkFunc пользователь может указать здесь функцию, которая должна быть выполнена транзакционно
+// writer вызовет ее в одной транзакции с отправкой сообщения в outbox таблицу
+type TxWorkFunc func(ctx context.Context, tx databases.TxQueryer) error
 
+// Writer отвечает за запись сообщений внутри пользовательской транзакции в outbox таблицу
 type Writer struct {
+	dbCtx *databases.DBContext
 }
 
-func NewWriter() *Writer {
-	return &Writer{}
+func New(dbCtx *databases.DBContext) *Writer {
+	return &Writer{dbCtx: dbCtx}
+}
+
+// buildInsertQuery строит инсерт с оутбокс сообщением
+func (w *Writer) buildInsertQuery() string {
+	p := w.dbCtx.GetSQLPlaceholder
+	return fmt.Sprintf(`
+INSERT INTO %s (
+	saga_id, step_name, topic,
+	created_at, scheduled_at, metadata, payload
+) VALUES (%s, %s, %s, %s, %s, %s, %s)`,
+		"saga.outbox",
+		p(1), p(2), p(3), p(4), p(5), p(6), p(7)) //nolint:mnd
 }
 
 func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName string) (*OutboxMessage, error) {
@@ -62,13 +68,15 @@ func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName st
 	}, nil
 }
 
-func (w *Writer) write(ctx context.Context, msg message.Message, tx pgx.Tx, topic, stepName string) error {
+// write сохраняет сообщение в outbox таблицу
+func (w *Writer) write(ctx context.Context, msg message.Message, tx databases.TxQueryer, topic, stepName string) error {
 	outboxMsg, err := w.fromSagaToOutboxMessage(msg, topic, stepName)
 	if err != nil {
 		return fmt.Errorf("outbox convert message: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, insertOutboxQuery,
+	query := w.buildInsertQuery()
+	_, err = tx.ExecContext(ctx, query,
 		outboxMsg.SagaID,
 		outboxMsg.StepName,
 		outboxMsg.Topic,
@@ -84,11 +92,45 @@ func (w *Writer) write(ctx context.Context, msg message.Message, tx pgx.Tx, topi
 	return nil
 }
 
-func (w *Writer) WriteMessages(ctx context.Context, msg message.Message, tx pgx.Tx, topics []string, stepName string) error {
+// writeMessages запишет внутри транзации сообщения в базку для каждого топика
+func (w *Writer) writeMessages(ctx context.Context, msg message.Message, tx databases.TxQueryer, topics []string, stepName string) error {
 	for _, topic := range topics {
 		if err := w.write(ctx, msg, tx, topic, stepName); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// WriteTx начинает транзакцию, вызывает бизнес функцию пользователя, которая должна произойти перед
+// отправкой сообщения в outbox
+func (w *Writer) WriteTx(
+	ctx context.Context,
+	msg message.Message,
+	topics []string,
+	stepName string,
+	fn TxWorkFunc,
+) error {
+	tx, err := w.dbCtx.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("outbox begin tx: %w", err)
+	}
+
+	defer tx.Rollback() //nolint:errcheck
+
+	if fn != nil {
+		if err := fn(ctx, tx); err != nil {
+			return err
+		}
+	}
+
+	if err := w.writeMessages(ctx, msg, tx, topics, stepName); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("outbox commit tx: %w", err)
+	}
+
 	return nil
 }
