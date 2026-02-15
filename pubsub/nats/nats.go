@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/nats-io/nats.go"
+
+	"github.com/SosisterRapStar/LETI-paper/domain/message"
 )
 
 type Client struct {

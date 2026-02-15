@@ -8,11 +8,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/SosisterRapStar/LETI-paper/domain/broker"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/SosisterRapStar/LETI-paper/thirdparty/backoff"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var batchQuery = `
@@ -137,8 +138,8 @@ func (r *Reader) NewReader(rp ReaderParams) *Reader {
 	// это пока не доделано
 	var (
 		buffer    []*OutboxMessage
-		reader    Reader = Reader{}
-		batchSize        = defaultBatchSize
+		reader    = Reader{}
+		batchSize = defaultBatchSize
 	)
 	if rp.BatchSize != nil {
 		batchSize = *rp.BatchSize
@@ -202,7 +203,9 @@ func (r *Reader) polling(userCtx context.Context) {
 				r.sendError(fmt.Errorf("outbox scan batch: %w", err))
 			}
 			for i := 0; i < readed; i++ {
-				r.processMessage(userCtx, r.buffer[i])
+				if err := r.processMessage(userCtx, r.buffer[i]); err != nil {
+					r.sendError(fmt.Errorf("outbox process batch: %w", err))
+				}
 			}
 		}
 	}
@@ -217,17 +220,21 @@ func (r *Reader) sendError(err error) {
 	}
 }
 
-func (r *Reader) processMessage(ctx context.Context, msg *OutboxMessage) {
-	sagaMsg := r.fromOutboxToSagaMessage(*msg)
+func (r *Reader) processMessage(ctx context.Context, msg *OutboxMessage) error {
+	sagaMsg, err := r.fromOutboxToSagaMessage(msg)
+	if err != nil {
+		return err
+	}
 	// TODO: нужно добавить свои собственные ошибки, чтобы как-то различать,
 	// какие ошибки пришли от паблишера и связаны ли они вообще с сообщениями
 	// обязательно их логировать
 	if err := r.Publisher.Publish(ctx, msg.Topic, sagaMsg); err != nil {
 		r.sendError(fmt.Errorf("outbox publish [saga_id=%s, step=%s]: %w", msg.SagaID, msg.StepName, err))
 		r.handlePublishError(ctx, msg)
-		return
+		return nil
 	}
 	r.handlePublishSuccess(ctx, msg)
+	return nil
 }
 
 func (r *Reader) handlePublishError(ctx context.Context, msg *OutboxMessage) {
@@ -258,7 +265,7 @@ func (r *Reader) updateOutboxOnSuccess(
 	msg *OutboxMessage,
 	processedAt time.Time) error {
 	tx, err := r.pool.Begin(ctx)
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) //nolint:errcheck
 	if err != nil {
 		return err
 	}
@@ -279,7 +286,7 @@ func (r *Reader) updateOutboxOnErr(
 	lastAttempt time.Time,
 	nextAttempt time.Time) error {
 	tx, err := r.pool.Begin(ctx)
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) //nolint:errcheck
 	if err != nil {
 		return err
 	}
@@ -294,19 +301,21 @@ func (r *Reader) updateOutboxOnErr(
 	return nil
 }
 
-func (r *Reader) fromOutboxToSagaMessage(oMsg OutboxMessage) message.Message {
+func (r *Reader) fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, error) {
 	var (
 		meta    message.MessageMeta
 		payload message.MessagePayload
 	)
 	meta.FromStep = oMsg.StepName
 	meta.SagaID = oMsg.StepName
-	json.Unmarshal(oMsg.Payload, &payload)
+	if err := json.Unmarshal(oMsg.Payload, &payload); err != nil {
+		return message.Message{}, err
+	}
 
 	return message.Message{
 		MessageMeta:    meta,
 		MessagePayload: payload,
-	}
+	}, nil
 }
 
 func (r *Reader) scanBatch(ctx context.Context) (int, error) {
@@ -325,7 +334,7 @@ func (r *Reader) scanBatch(ctx context.Context) (int, error) {
 
 	for rows.Next() {
 		om := r.buffer[rowsCounter]
-		rows.Scan(
+		if err := rows.Scan(
 			&om.SagaID,
 			&om.StepName,
 			&om.Topic,
@@ -336,7 +345,9 @@ func (r *Reader) scanBatch(ctx context.Context) (int, error) {
 			&om.AttemptCounter,
 			&om.LastAttempt,
 			&om.ProcessedAt,
-		)
+		); err != nil {
+			return rowsCounter, fmt.Errorf("outbox scan row: %w", err)
+		}
 		rowsCounter++
 	}
 

@@ -55,12 +55,12 @@ type Step struct {
 
 // проблема в том, что мы можем сделать компенсацию как для нашего шага, так сделать onCompensate для шага execute
 
-func New(p StepParams) (Step, error) {
+func New(p *StepParams) (*Step, error) {
 	if p.Name == "" {
-		return Step{}, fmt.Errorf("Step name is required")
+		return nil, fmt.Errorf("Step name is required")
 	}
 
-	return Step{
+	return &Step{
 		name:              p.Name,
 		execute:           p.Execute,
 		compensate:        p.Compensate,
@@ -70,7 +70,7 @@ func New(p StepParams) (Step, error) {
 	}, nil
 }
 
-func (s Step) Name() string {
+func (s *Step) Name() string {
 	return s.name
 }
 
@@ -81,26 +81,26 @@ func (s Step) Name() string {
 // ладно на самом деле тут можно сделать какую-то логику ретрая
 // можно например добавить в структуру step поле onRetry и т.д.
 // поэтому какой-то смысл есть наверное
-func (s Step) GetRouting() RoutingConfig {
+func (s *Step) GetRouting() RoutingConfig {
 	return s.routing
 }
 
 // не знаю зачем я сделал такую логику тупую, типа нахуя, можно же просто вызывать s.execute
 // но я почему-то не могу так сделать, что-то внутри хочет сделать этот ебанный полугеттер полухуй
-func (s Step) Execute(ctx context.Context, msg message.Message) (message.Message, error) {
+func (s *Step) Execute(ctx context.Context, msg message.Message) (message.Message, error) {
 	return s.execute(ctx, msg)
 }
 
 // для повтора сделаем декоратор с повторами, но потом
-func (s Step) OnFail(ctx context.Context, msg message.Message) (message.Message, error) {
+func (s *Step) OnFail(ctx context.Context, msg message.Message) (message.Message, error) {
 	return s.compensate(ctx, msg)
 }
 
-func (s Step) GetOnError() ErrorHandler {
+func (s *Step) GetOnError() ErrorHandler {
 	return s.onError
 }
 
-func (s Step) GetOnCompensateError() ErrorHandler {
+func (s *Step) GetOnCompensateError() ErrorHandler {
 	return s.onCompensateError
 }
 

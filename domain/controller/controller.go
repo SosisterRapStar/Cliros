@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/bytedance/gopkg/util/logger"
+	"github.com/google/uuid"
+
 	"github.com/SosisterRapStar/LETI-paper/domain/broker"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/SosisterRapStar/LETI-paper/domain/step"
-	"github.com/bytedance/gopkg/util/logger"
-	"github.com/google/uuid"
 )
 
 // пользователь должен указать pubsub и еще должен указать, какие топики что делают
@@ -18,8 +19,8 @@ import (
 // наверное это нужно делать в Step
 // пусть описание топиков для отката и топиков для следующих действий будет не в контроллере, а step
 type Saga interface {
-	Register(string, step.Step)
-	StartSaga(context.Context, step.Step, message.Message)
+	Register(string, *step.Step) error
+	StartSaga(context.Context, *step.Step, message.Message) error
 }
 
 type Controller struct {
@@ -36,14 +37,14 @@ type Controller struct {
 // то есть пусть step
 // нам нужно сейчас как-то получить
 // здесь нужно убрать, topic
-func (c *Controller) Register(topic string, step step.Step) {
+func (c *Controller) Register(topic string, step *step.Step) error {
 	var (
-		ctx context.Context = context.Background()
+		ctx = context.Background()
 	)
-	c.Pubsub.Subscribe(ctx, topic, func(ctx context.Context, msg message.Message) error {
+	return c.Pubsub.Subscribe(ctx, topic, func(ctx context.Context, msg message.Message) error {
 		var (
-			sagaID   string = msg.GetSagaID()
-			stepName string = msg.FromStep
+			sagaID   = msg.GetSagaID()
+			stepName = msg.FromStep
 		)
 
 		logger.Info("got message from step: %s", stepName)
@@ -57,12 +58,12 @@ func (c *Controller) Register(topic string, step step.Step) {
 		switch msgType {
 		case message.EventTypeComplete:
 			if err := c.executeAction(ctx, step, msg); err != nil {
-				logger.Warnf("error occured: %s", err.Error())
+				logger.Warnf("error occurred: %s", err.Error())
 				return err
 			}
 		case message.EventTypeFailed:
 			if err := c.compensateAction(ctx, step, msg); err != nil {
-				logger.Warnf("error occured: %s", err.Error())
+				logger.Warnf("error occurred: %s", err.Error())
 				return err
 			}
 		default:
@@ -80,7 +81,7 @@ func (c *Controller) generateSagaIDByUUIDV7() (string, error) {
 	return uuid.String(), nil
 }
 
-func (c *Controller) executeAction(ctx context.Context, stp step.Step, msg message.Message) error {
+func (c *Controller) executeAction(ctx context.Context, stp *step.Step, msg message.Message) error {
 	newMsg, err := stp.Execute(ctx, msg)
 	if err != nil {
 		return c.handleExecuteError(ctx, stp, msg, err)
@@ -89,7 +90,7 @@ func (c *Controller) executeAction(ctx context.Context, stp step.Step, msg messa
 	return c.sendSuccessMessage(ctx, stp, newMsg)
 }
 
-func (c *Controller) handleExecuteError(ctx context.Context, stp step.Step, msg message.Message, err error) error {
+func (c *Controller) handleExecuteError(ctx context.Context, stp *step.Step, msg message.Message, err error) error {
 	errHandler := stp.GetOnError()
 	if errHandler == nil {
 		return c.sendFailureMessage(ctx, stp, msg)
@@ -105,7 +106,7 @@ func (c *Controller) handleExecuteError(ctx context.Context, stp step.Step, msg 
 	return c.sendSuccessMessage(ctx, stp, recoveryMsg)
 }
 
-func (c *Controller) sendSuccessMessage(ctx context.Context, stp step.Step, msg message.Message) error {
+func (c *Controller) sendSuccessMessage(ctx context.Context, stp *step.Step, msg message.Message) error {
 	msg.MessageType = message.EventTypeComplete
 	if err := c.sendNextToExecute(ctx, stp, msg); err != nil {
 		logger.Warnf("failed to send complete event to next services, sagaID: %s", msg.SagaID)
@@ -114,7 +115,7 @@ func (c *Controller) sendSuccessMessage(ctx context.Context, stp step.Step, msg 
 	return nil
 }
 
-func (c *Controller) sendFailureMessage(ctx context.Context, stp step.Step, msg message.Message) error {
+func (c *Controller) sendFailureMessage(ctx context.Context, stp *step.Step, msg message.Message) error {
 	msg.MessageType = message.EventTypeFailed
 	if err := c.sendOnFail(ctx, stp, msg); err != nil {
 		logger.Warnf("failed to send failure event, sagaID: %s", msg.SagaID)
@@ -124,7 +125,7 @@ func (c *Controller) sendFailureMessage(ctx context.Context, stp step.Step, msg 
 	return nil
 }
 
-func (c *Controller) sendOnFail(ctx context.Context, stp step.Step, msg message.Message) error {
+func (c *Controller) sendOnFail(ctx context.Context, stp *step.Step, msg message.Message) error {
 	routing := stp.GetRouting()
 	if len(routing.ErrorTopics) == 0 {
 		logger.Info("no error topics configured, skipping failure notification")
@@ -140,7 +141,7 @@ func (c *Controller) sendOnFail(ctx context.Context, stp step.Step, msg message.
 	return nil
 }
 
-func (c *Controller) sendNextToExecute(ctx context.Context, stp step.Step, msg message.Message) error {
+func (c *Controller) sendNextToExecute(ctx context.Context, stp *step.Step, msg message.Message) error {
 	routing := stp.GetRouting()
 	if len(routing.NextStepTopics) == 0 {
 		logger.Info("no next step topics configured")
@@ -156,7 +157,7 @@ func (c *Controller) sendNextToExecute(ctx context.Context, stp step.Step, msg m
 	return nil
 }
 
-func (c *Controller) compensateAction(ctx context.Context, stp step.Step, msg message.Message) error {
+func (c *Controller) compensateAction(ctx context.Context, stp *step.Step, msg message.Message) error {
 	compensationMsg, err := stp.OnFail(ctx, msg)
 	if err != nil {
 		return c.handleCompensateError(ctx, stp, msg, err)
@@ -165,7 +166,7 @@ func (c *Controller) compensateAction(ctx context.Context, stp step.Step, msg me
 	return c.sendCompensationSuccess(ctx, stp, compensationMsg)
 }
 
-func (c *Controller) handleCompensateError(ctx context.Context, stp step.Step, msg message.Message, err error) error {
+func (c *Controller) handleCompensateError(ctx context.Context, stp *step.Step, msg message.Message, err error) error {
 	errHandler := stp.GetOnCompensateError()
 	if errHandler == nil {
 		logger.Warnf("compensation failed and no error handler configured, sagaID: %s", msg.SagaID)
@@ -182,7 +183,7 @@ func (c *Controller) handleCompensateError(ctx context.Context, stp step.Step, m
 	return c.sendCompensationSuccess(ctx, stp, recoveryMsg)
 }
 
-func (c *Controller) sendCompensationSuccess(ctx context.Context, stp step.Step, msg message.Message) error {
+func (c *Controller) sendCompensationSuccess(ctx context.Context, stp *step.Step, msg message.Message) error {
 	routing := stp.GetRouting()
 	if len(routing.ErrorTopics) == 0 {
 		logger.Info("no error topics configured for compensation propagation")
@@ -199,10 +200,10 @@ func (c *Controller) sendCompensationSuccess(ctx context.Context, stp step.Step,
 	return nil
 }
 
-func (c *Controller) StartSaga(ctx context.Context, stp step.Step, msg message.Message) error {
+func (c *Controller) StartSaga(ctx context.Context, stp *step.Step, msg message.Message) error {
 	sagaID, err := c.generateSagaIDByUUIDV7()
 	if err != nil {
-		logger.Warn("error occured generating saga ID")
+		logger.Warn("error occurred generating saga ID")
 		return fmt.Errorf("failed to generate saga id: %w", err)
 	}
 

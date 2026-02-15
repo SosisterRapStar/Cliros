@@ -4,8 +4,9 @@ import (
 	"context"
 	"log"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/outbox/migrations"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/SosisterRapStar/LETI-paper/domain/outbox/migrations"
 )
 
 type Postgres struct {
@@ -28,7 +29,7 @@ func NewPostgres(ctx context.Context, durl string) *Postgres {
 
 func (p *Postgres) RunMigration(ctx context.Context) error {
 	tx, err := p.pool.Begin(ctx)
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) //nolint:errcheck
 	if err != nil {
 		return err
 	}
