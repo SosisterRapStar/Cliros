@@ -8,6 +8,10 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/thirdparty/backoff"
 )
 
+var (
+	MaxRetriesExceeded = errors.New("max retries number achieved")
+)
+
 type RetryableError struct {
 	err error
 }
@@ -41,8 +45,8 @@ type Retrier struct {
 	MaxRetries uint
 }
 
-func (r *Retrier) Retry(ctx context.Context, work work) {
-
+func (r *Retrier) Retry(ctx context.Context, work work) error {
+	return r.retry(ctx, work)
 }
 
 func (r *Retrier) retry(ctx context.Context, work work) error {
@@ -55,6 +59,9 @@ func (r *Retrier) retry(ctx context.Context, work work) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+			if retries >= r.MaxRetries {
+				return MaxRetriesExceeded
+			}
 			err := work(ctx)
 			if !errors.As(err, &retryable) {
 				return err
