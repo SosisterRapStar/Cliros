@@ -92,8 +92,8 @@ func (w *Writer) write(ctx context.Context, msg message.Message, tx databases.Tx
 	return nil
 }
 
-// writeMessages запишет внутри транзации сообщения в базку для каждого топика
-func (w *Writer) writeMessages(ctx context.Context, msg message.Message, tx databases.TxQueryer, topics []string, stepName string) error {
+// WriteMessages запишет внутри транзации сообщения в базку для каждого топика
+func (w *Writer) WriteMessages(ctx context.Context, msg message.Message, tx databases.TxQueryer, topics []string, stepName string) error {
 	for _, topic := range topics {
 		if err := w.write(ctx, msg, tx, topic, stepName); err != nil {
 			return err
@@ -124,7 +124,7 @@ func (w *Writer) WriteTx(
 		}
 	}
 
-	if err := w.writeMessages(ctx, msg, tx, topics, stepName); err != nil {
+	if err := w.WriteMessages(ctx, msg, tx, topics, stepName); err != nil {
 		return err
 	}
 

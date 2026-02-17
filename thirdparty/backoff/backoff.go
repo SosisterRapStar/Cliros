@@ -2,6 +2,7 @@ package backoff
 
 import (
 	"math"
+	"math/rand"
 	"time"
 )
 
@@ -28,4 +29,32 @@ func (e Expontential) CalcBackoff(retryNumber uint, minBackoff, maxBackoff time.
 	} else {
 		return time.Duration(math.Ceil(newBackoff))
 	}
+}
+
+type ExpontentialWithJitter struct {
+	expFactor float64
+}
+
+func (e ExpontentialWithJitter) CalcBackoff(retryNumber uint, minBackoff, maxBackoff time.Duration) time.Duration {
+	var (
+		nillDur time.Duration
+	)
+	if retryNumber <= 0 {
+		return minBackoff
+	}
+
+	baseBackoff := 1.0 + float64(retryNumber-1)*e.expFactor
+
+	var cappedBackoff float64
+	if maxBackoff != nillDur {
+		cappedBackoff = min(baseBackoff, float64(maxBackoff))
+	} else {
+		cappedBackoff = baseBackoff
+	}
+
+	jitteredBackoff := rand.Float64() * cappedBackoff
+
+	result := math.Max(jitteredBackoff, float64(minBackoff))
+
+	return time.Duration(math.Ceil(result))
 }

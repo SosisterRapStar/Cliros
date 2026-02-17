@@ -81,18 +81,12 @@ func (c *Controller) executeAction(ctx context.Context, stp *step.Step, msg mess
 		return fmt.Errorf("begin tx: %w", err)
 	}
 
-	var committed bool
-	defer func() {
-		if !committed {
-			_ = tx.Rollback() //nolint:errcheck
-		}
-	}()
+	defer tx.Rollback()
 
 	newMsg, err := stp.Execute(ctx, tx, msg)
 	if err != nil {
 		// Execute failed -- rollback business tx, handle error separately
 		_ = tx.Rollback() //nolint:errcheck
-		committed = true  // prevent double rollback in defer
 		return c.handleExecuteError(ctx, stp, msg, err)
 	}
 
@@ -111,7 +105,6 @@ func (c *Controller) executeAction(ctx context.Context, stp *step.Step, msg mess
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
 	}
-	committed = true
 
 	logger.Info("execute action committed, messages written to outbox")
 	return nil
@@ -142,17 +135,10 @@ func (c *Controller) compensateAction(ctx context.Context, stp *step.Step, msg m
 		return fmt.Errorf("begin tx: %w", err)
 	}
 
-	var committed bool
-	defer func() {
-		if !committed {
-			_ = tx.Rollback() //nolint:errcheck
-		}
-	}()
+	defer tx.Rollback() //nolint:errcheck
 
 	compensationMsg, err := stp.OnFail(ctx, tx, msg)
 	if err != nil {
-		_ = tx.Rollback() //nolint:errcheck
-		committed = true
 		return c.handleCompensateError(ctx, stp, msg, err)
 	}
 
@@ -171,7 +157,6 @@ func (c *Controller) compensateAction(ctx context.Context, stp *step.Step, msg m
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit compensation tx: %w", err)
 	}
-	committed = true
 
 	logger.Info("compensation committed, messages written to outbox")
 	return nil
