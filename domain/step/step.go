@@ -20,8 +20,6 @@ type Action func(ctx context.Context, tx databases.TxQueryer, msg message.Messag
 // а создавать Tx в controller.go когда он вызывает обработчики ошибок
 type ErrorHandler func(ctx context.Context, msg message.Message, err error) (message.Message, error)
 
-type IDFunc func() string
-
 type StepParams struct {
 	Name              string
 	Execute           Action

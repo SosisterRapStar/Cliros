@@ -1,4 +1,4 @@
-package outbox
+package reader
 
 import (
 	"context"
@@ -8,26 +8,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/SosisterRapStar/LETI-paper/domain/broker"
 	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
+	"github.com/SosisterRapStar/LETI-paper/domain/outbox"
 	"github.com/SosisterRapStar/LETI-paper/thirdparty/backoff"
 )
-
-type OutboxMessage struct {
-	SagaID         uuid.UUID
-	StepName       string
-	Topic          string
-	CreatedAt      time.Time
-	ScheduledAt    time.Time
-	Metadata       []byte
-	Payload        []byte
-	AttemptCounter uint
-	LastAttempt    *time.Time
-	ProcessedAt    *time.Time
-}
 
 const (
 	defaultInterval  = 1 * time.Second
@@ -63,7 +49,7 @@ type Reader struct {
 	// поэтому не думаем о конкурентности в этом плане здесь
 	// нужно не забыть, что после того когда создали такой буфер, его размеры нельзя менять никогда и не при каких условиях
 	// пусть пока что будет так, что пользователь не сможет поменять буфер в рантайме, ему придется перезапускать приложение
-	buffer []*OutboxMessage
+	buffer []*outbox.OutboxMessage
 
 	// Переменная, что стартовали
 	started int32
@@ -96,7 +82,7 @@ func NewPollingSettings(interval time.Duration, batchSize int) PollingSettings {
 	}
 }
 
-func NewReader(dbCtx *databases.DBContext, publisher broker.Publisher, polling PollingSettings, boff BackoffSettings, errCh chan<- error) *Reader {
+func New(dbCtx *databases.DBContext, publisher broker.Publisher, polling PollingSettings, boff BackoffSettings, errCh chan<- error) *Reader {
 	batchSize := polling.batchSize
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
@@ -104,9 +90,9 @@ func NewReader(dbCtx *databases.DBContext, publisher broker.Publisher, polling P
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	buffer := make([]*OutboxMessage, batchSize)
+	buffer := make([]*outbox.OutboxMessage, batchSize)
 	for i := range buffer {
-		buffer[i] = &OutboxMessage{}
+		buffer[i] = &outbox.OutboxMessage{}
 	}
 
 	return &Reader{
@@ -191,7 +177,7 @@ func (r *Reader) sendError(err error) {
 	}
 }
 
-func (r *Reader) processMessage(ctx context.Context, msg *OutboxMessage) error {
+func (r *Reader) processMessage(ctx context.Context, msg *outbox.OutboxMessage) error {
 	sagaMsg, err := fromOutboxToSagaMessage(msg)
 	if err != nil {
 		return err
@@ -208,7 +194,7 @@ func (r *Reader) processMessage(ctx context.Context, msg *OutboxMessage) error {
 	return nil
 }
 
-func (r *Reader) handlePublishError(ctx context.Context, msg *OutboxMessage) {
+func (r *Reader) handlePublishError(ctx context.Context, msg *outbox.OutboxMessage) {
 	attemptTime := time.Now()
 	nextAttempt := r.calculateNextAttempt(msg)
 	if err := r.updateOutboxOnErr(ctx, msg, attemptTime, nextAttempt); err != nil {
@@ -216,13 +202,13 @@ func (r *Reader) handlePublishError(ctx context.Context, msg *OutboxMessage) {
 	}
 }
 
-func (r *Reader) handlePublishSuccess(ctx context.Context, msg *OutboxMessage) {
+func (r *Reader) handlePublishSuccess(ctx context.Context, msg *outbox.OutboxMessage) {
 	if err := r.updateOutboxOnSuccess(ctx, msg, time.Now()); err != nil {
 		r.sendError(fmt.Errorf("outbox update on success [saga_id=%s, step=%s]: %w", msg.SagaID, msg.StepName, err))
 	}
 }
 
-func (r *Reader) calculateNextAttempt(msg *OutboxMessage) time.Time {
+func (r *Reader) calculateNextAttempt(msg *outbox.OutboxMessage) time.Time {
 	backoffDuration := r.BackoffSettings.backoffPolicy.CalcBackoff(
 		msg.AttemptCounter,
 		r.BackoffSettings.backoffMin,
@@ -276,7 +262,7 @@ WHERE
 
 func (r *Reader) updateOutboxOnSuccess(
 	ctx context.Context,
-	msg *OutboxMessage,
+	msg *outbox.OutboxMessage,
 	processedAt time.Time,
 ) error {
 	tx, err := r.dbCtx.DB().BeginTx(ctx, nil)
@@ -295,7 +281,7 @@ func (r *Reader) updateOutboxOnSuccess(
 
 func (r *Reader) updateOutboxOnErr(
 	ctx context.Context,
-	msg *OutboxMessage,
+	msg *outbox.OutboxMessage,
 	lastAttempt, nextAttempt time.Time,
 ) error {
 	tx, err := r.dbCtx.DB().BeginTx(ctx, nil)
@@ -312,7 +298,7 @@ func (r *Reader) updateOutboxOnErr(
 	return tx.Commit()
 }
 
-func fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, error) {
+func fromOutboxToSagaMessage(oMsg *outbox.OutboxMessage) (message.Message, error) {
 	var (
 		meta    message.MessageMeta
 		payload message.MessagePayload

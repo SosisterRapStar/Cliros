@@ -10,7 +10,7 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/domain/broker"
 	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
-	"github.com/SosisterRapStar/LETI-paper/domain/outbox"
+	"github.com/SosisterRapStar/LETI-paper/domain/outbox/writer"
 	"github.com/SosisterRapStar/LETI-paper/domain/step"
 )
 
@@ -25,7 +25,7 @@ type Saga interface {
 // Reader вычитывает outbox и публикует сообщения в брокер.
 type Controller struct {
 	Pubsub broker.Subsciber
-	Writer *outbox.Writer
+	Writer *writer.Writer
 	DBCtx  *databases.DBContext
 }
 

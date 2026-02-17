@@ -16,7 +16,8 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/domain/controller"
 	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
-	"github.com/SosisterRapStar/LETI-paper/domain/outbox"
+	"github.com/SosisterRapStar/LETI-paper/domain/outbox/reader"
+	"github.com/SosisterRapStar/LETI-paper/domain/outbox/writer"
 	"github.com/SosisterRapStar/LETI-paper/domain/step"
 	"github.com/SosisterRapStar/LETI-paper/thirdparty/backoff"
 )
@@ -50,14 +51,14 @@ func main() {
 	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
 
 	// 3. Создаём Writer и Reader для outbox
-	writer := outbox.NewWriter(dbCtx)
+	writer := writer.New(dbCtx)
 
 	// Настройки для Reader
-	pollingSettings := outbox.NewPollingSettings(1*time.Second, 10)
-	backoffSettings := outbox.NewBackoffSettings(backoff.Expontential{}, 100*time.Millisecond, 1*time.Minute)
+	pollingSettings := reader.NewPollingSettings(1*time.Second, 10)
+	backoffSettings := reader.NewBackoffSettings(backoff.Expontential{}, 100*time.Millisecond, 1*time.Minute)
 
 	errCh := make(chan error, 128) //nolint:mnd
-	reader := outbox.NewReader(dbCtx, &stubPubsub{}, pollingSettings, backoffSettings, errCh)
+	reader := reader.New(dbCtx, &stubPubsub{}, pollingSettings, backoffSettings, errCh)
 
 	// 4. Создаём Controller
 	ctrl := &controller.Controller{

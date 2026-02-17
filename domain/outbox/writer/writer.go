@@ -1,4 +1,4 @@
-package outbox
+package writer
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
+	"github.com/SosisterRapStar/LETI-paper/domain/outbox"
 )
 
 // TxWorkFunc пользователь может указать здесь функцию, которая должна быть выполнена транзакционно
@@ -37,7 +38,7 @@ INSERT INTO %s (
 		p(1), p(2), p(3), p(4), p(5), p(6), p(7)) //nolint:mnd
 }
 
-func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName string) (*OutboxMessage, error) {
+func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName string) (*outbox.OutboxMessage, error) {
 	sagaUUID, err := uuid.Parse(msg.SagaID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid saga_id format: %w", err)
@@ -54,7 +55,7 @@ func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName st
 	}
 
 	now := time.Now()
-	return &OutboxMessage{
+	return &outbox.OutboxMessage{
 		SagaID:         sagaUUID,
 		StepName:       stepName,
 		Topic:          topic,
