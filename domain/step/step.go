@@ -15,6 +15,9 @@ type Action func(ctx context.Context, tx databases.TxQueryer, msg message.Messag
 
 // ErrorHandler -- обработчик ошибок, вызывается при падении Execute или Compensate.
 // Позволяет пользователю решить, что делать с ошибкой (retry, transform, etc).
+// TODO: тут нужно что-то делать, если хотим ретраить, то сюда тоже нужно прокинуть Tx
+// так как например ретраить будем каждый шаг, это по идее можно пофиксить и кидать сюда Tx
+// а создавать Tx в controller.go когда он вызывает обработчики ошибок
 type ErrorHandler func(ctx context.Context, msg message.Message, err error) (message.Message, error)
 
 type IDFunc func() string
