@@ -15,11 +15,13 @@ import (
 
 	"github.com/SosisterRapStar/LETI-paper/domain/controller"
 	"github.com/SosisterRapStar/LETI-paper/domain/databases"
+	"github.com/SosisterRapStar/LETI-paper/domain/executor"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/SosisterRapStar/LETI-paper/domain/outbox/reader"
 	"github.com/SosisterRapStar/LETI-paper/domain/outbox/writer"
 	"github.com/SosisterRapStar/LETI-paper/domain/step"
 	"github.com/SosisterRapStar/LETI-paper/thirdparty/backoff"
+	"github.com/SosisterRapStar/LETI-paper/thirdparty/retrier"
 )
 
 // --- Заглушка для брокера (в реальности — NATS, Kafka, RabbitMQ) ---
@@ -51,23 +53,38 @@ func main() {
 	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
 
 	// 3. Создаём Writer и Reader для outbox
-	writer := writer.New(dbCtx)
+	w := writer.New(dbCtx)
 
 	// Настройки для Reader
 	pollingSettings := reader.NewPollingSettings(1*time.Second, 10)
 	backoffSettings := reader.NewBackoffSettings(backoff.Expontential{}, 100*time.Millisecond, 1*time.Minute)
 
 	errCh := make(chan error, 128) //nolint:mnd
-	reader := reader.New(dbCtx, &stubPubsub{}, pollingSettings, backoffSettings, errCh)
+	r := reader.New(dbCtx, &stubPubsub{}, pollingSettings, backoffSettings, errCh)
 
-	// 4. Создаём Controller
-	ctrl := &controller.Controller{
-		Pubsub: &stubPubsub{},
-		Writer: writer,
-		DBCtx:  dbCtx,
+	// 4. Создаём инфраструктурный retrier (для BeginTx, Commit, WriteOutbox)
+	infraRetrier := &retrier.Retrier{
+		BackoffOptions: retrier.BackoffOptions{
+			BackoffPolicy: backoff.Expontential{},
+			MinBackoff:    50 * time.Millisecond, //nolint:mnd
+			MaxBackoff:    5 * time.Second,       //nolint:mnd
+		},
+		MaxRetries: 10, //nolint:mnd
 	}
 
-	// 5. Определяем шаг саги "create-order"
+	// 5. Создаём StepExecutor — управляет транзакциями и retry
+	exec, err := executor.New(dbCtx.DB(), w, infraRetrier)
+	if err != nil {
+		log.Fatalf("failed to create executor: %v", err)
+	}
+
+	// 6. Создаём Controller — подписка на топики и маршрутизация
+	ctrl, err := controller.New(&stubPubsub{}, exec)
+	if err != nil {
+		log.Fatalf("failed to create controller: %v", err)
+	}
+
+	// 7. Определяем шаг саги "create-order"
 	//
 	// Execute: пользовательская бизнес-логика выполняется в той же транзакции,
 	//          что и запись в outbox. Всё атомарно — либо и заказ создан,
@@ -125,7 +142,7 @@ func main() {
 			ErrorTopics: []string{"order-service.compensate"},
 		},
 		// Пример: обработчик ошибок. Если Execute упал — можно решить, что делать
-		OnError: func(_ context.Context, msg message.Message, err error) (message.Message, error) {
+		OnError: func(_ context.Context, _ databases.TxQueryer, msg message.Message, err error) (message.Message, error) {
 			log.Printf("execute error handler: %v", err)
 			// Возвращаем ошибку — значит отправим failure event
 			return msg, err
@@ -135,23 +152,23 @@ func main() {
 		log.Fatalf("failed to create step: %v", err)
 	}
 
-	// 6. Регистрируем шаг на топик
+	// 8. Регистрируем шаг на топик
 	if err := ctrl.Register("order-service.create", orderStep); err != nil {
 		log.Fatalf("failed to register step: %v", err)
 	}
 
-	// 7. Запускаем Reader (фоновый поллинг outbox -> publish в брокер)
-	reader.Start(ctx)
-	defer reader.Close()
+	// 9. Запускаем Reader (фоновый поллинг outbox -> publish в брокер)
+	r.Start(ctx)
+	defer r.Close()
 
-	// 8. Запуск обработки ошибок Reader'а в фоне
+	// 10. Запуск обработки ошибок Reader'а в фоне
 	go func() {
 		for err := range errCh {
 			log.Printf("[reader error] %v", err)
 		}
 	}()
 
-	// 9. Стартуем сагу — Controller создаёт TX, вызывает Execute, пишет outbox, коммитит
+	// 11. Стартуем сагу — Executor создаёт TX, вызывает Execute, пишет outbox, коммитит
 	initialMsg := message.Message{}
 	if err := ctrl.StartSaga(ctx, orderStep, initialMsg); err != nil {
 		log.Fatalf("failed to start saga: %v", err)

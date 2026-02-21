@@ -11,14 +11,16 @@ import (
 
 // Action -- пользовательский хэндлер для выполнения или компенсации шага саги.
 // tx -- транзакция, в которой выполняется бизнес-логика и запись в outbox атомарно.
+//
+// Если action хочет, чтобы при ошибке вызов был повторён (при наличии RetryPolicy) —
+// ошибку нужно обернуть через retrier.AsRetryable(err).
+// Не-retryable ошибки прекращают повторы и передаются в ErrorHandler.
 type Action func(ctx context.Context, tx databases.TxQueryer, msg message.Message) (message.Message, error)
 
-// ErrorHandler -- обработчик ошибок, вызывается при падении Execute или Compensate.
-// Позволяет пользователю решить, что делать с ошибкой (retry, transform, etc).
-// TODO: тут нужно что-то делать, если хотим ретраить, то сюда тоже нужно прокинуть Tx
-// так как например ретраить будем каждый шаг, это по идее можно пофиксить и кидать сюда Tx
-// а создавать Tx в controller.go когда он вызывает обработчики ошибок
-type ErrorHandler func(ctx context.Context, msg message.Message, err error) (message.Message, error)
+// ErrorHandler -- обработчик ошибок, вызывается executor'ом при падении Execute или Compensate
+// после того, как все повторные попытки (если были) исчерпаны.
+// tx создаётся executor'ом — каждый вызов получает свежую транзакцию.
+type ErrorHandler func(ctx context.Context, tx databases.TxQueryer, msg message.Message, err error) (message.Message, error)
 
 type StepParams struct {
 	Name              string
@@ -30,6 +32,8 @@ type StepParams struct {
 	OnCompensateError ErrorHandler
 }
 
+// Step — описание шага саги: бизнес-логика, компенсация, роутинг, retry-политика.
+// Является чистым контейнером данных. Управление транзакциями и retry выполняет executor.
 type Step struct {
 	name              string
 	execute           Action
@@ -40,17 +44,16 @@ type Step struct {
 	onCompensateError ErrorHandler
 }
 
-// defaultRetryErrorHandler возвращает ErrorHandler по умолчанию,
-// который при вызове ретраит переданный action с помощью retrier.
-// Замыкается над конкретным action (execute или compensate) и retrier.
-// TODO: сейчас tx передаётся как nil — требуется решение по управлению транзакциями.
-func defaultRetryErrorHandler(r *retrier.Retrier, action Action) ErrorHandler {
-	return func(ctx context.Context, msg message.Message, err error) (message.Message, error) {
+// WithRetry оборачивает пользовательский ErrorHandler в retry-логику.
+// handler повторяется при retrier.RetryableError в рамках одной транзакции.
+// Полезно для ретрая транзиентных не-DB ошибок (внешний API и т.п.).
+func WithRetry(r *retrier.Retrier, handler ErrorHandler) ErrorHandler {
+	return func(ctx context.Context, tx databases.TxQueryer, msg message.Message, originalErr error) (message.Message, error) {
 		var result message.Message
 		retryErr := r.Retry(ctx, func(innerCtx context.Context) error {
-			res, actionErr := action(innerCtx, nil, msg)
-			if actionErr != nil {
-				return retrier.AsRetryable(actionErr)
+			res, handlerErr := handler(innerCtx, tx, msg, originalErr)
+			if handlerErr != nil {
+				return handlerErr
 			}
 			result = res
 			return nil
@@ -61,17 +64,7 @@ func defaultRetryErrorHandler(r *retrier.Retrier, action Action) ErrorHandler {
 
 func New(p *StepParams) (*Step, error) {
 	if p.Name == "" {
-		return nil, fmt.Errorf("Step name is required")
-	}
-
-	onError := p.OnError
-	if onError == nil && p.RetryPolicy != nil {
-		onError = defaultRetryErrorHandler(p.RetryPolicy, p.Execute)
-	}
-
-	onCompensateError := p.OnCompensateError
-	if onCompensateError == nil && p.RetryPolicy != nil {
-		onCompensateError = defaultRetryErrorHandler(p.RetryPolicy, p.Compensate)
+		return nil, fmt.Errorf("step name is required")
 	}
 
 	return &Step{
@@ -80,8 +73,8 @@ func New(p *StepParams) (*Step, error) {
 		compensate:        p.Compensate,
 		routing:           p.Routing,
 		retryPolicy:       p.RetryPolicy,
-		onError:           onError,
-		onCompensateError: onCompensateError,
+		onError:           p.OnError,
+		onCompensateError: p.OnCompensateError,
 	}, nil
 }
 
@@ -89,25 +82,16 @@ func (s *Step) Name() string {
 	return s.name
 }
 
-// должны где-то отправлять сообщение дальше, для саги
-// при этом надо разграничить класс,
-// который держит сагу и который держит пабсаб и остальные зависимости
-// надо указать, а в какой-топик отправлять, а что делать
-// ладно на самом деле тут можно сделать какую-то логику ретрая
-// можно например добавить в структуру step поле onRetry и т.д.
-// поэтому какой-то смысл есть наверное
 func (s *Step) GetRouting() RoutingConfig {
 	return s.routing
 }
 
-// Execute вызывает пользовательский хэндлер для выполнения шага.
-func (s *Step) Execute(ctx context.Context, tx databases.TxQueryer, msg message.Message) (message.Message, error) {
-	return s.execute(ctx, tx, msg)
+func (s *Step) GetExecute() Action {
+	return s.execute
 }
 
-// OnFail вызывает компенсирующее действие.
-func (s *Step) OnFail(ctx context.Context, tx databases.TxQueryer, msg message.Message) (message.Message, error) {
-	return s.compensate(ctx, tx, msg)
+func (s *Step) GetCompensate() Action {
+	return s.compensate
 }
 
 func (s *Step) GetOnError() ErrorHandler {
@@ -121,8 +105,3 @@ func (s *Step) GetOnCompensateError() ErrorHandler {
 func (s *Step) GetRetryPolicy() *retrier.Retrier {
 	return s.retryPolicy
 }
-
-// при получении сообщения, должны посмотреть на тип сообщения
-// если тип execute - идем дальше
-// если тип compensate - вызываем функцию компенсирования
-// а если хотим retry действие а не компенсацию?
