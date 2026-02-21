@@ -8,8 +8,11 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/SosisterRapStar/LETI-paper/domain/broker"
+	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/executor"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
+	"github.com/SosisterRapStar/LETI-paper/domain/outbox/migrations"
+	"github.com/SosisterRapStar/LETI-paper/domain/outbox/reader"
 	"github.com/SosisterRapStar/LETI-paper/domain/step"
 )
 
@@ -21,22 +24,95 @@ type Saga interface {
 // Controller управляет шагами саги.
 // Отвечает за подписку на топики и маршрутизацию сообщений по типу (execute/failed).
 // Делегирует выполнение шагов и управление транзакциями в StepExecutor.
+//
+// Init запускает фоновые процессы (reader) и выполняет миграции.
+// Close останавливает reader.
 type Controller struct {
 	pubsub   broker.Subsciber
 	executor *executor.StepExecutor
+	reader   *reader.Reader
+	dbCtx    *databases.DBContext
 }
 
-func New(pubsub broker.Subsciber, exec *executor.StepExecutor) (*Controller, error) {
+func New(
+	pubsub broker.Subsciber,
+	exec *executor.StepExecutor,
+	r *reader.Reader,
+	dbCtx *databases.DBContext,
+) (*Controller, error) {
 	if pubsub == nil {
 		return nil, fmt.Errorf("pubsub is required")
 	}
 	if exec == nil {
 		return nil, fmt.Errorf("executor is required")
 	}
+	if r == nil {
+		return nil, fmt.Errorf("reader is required")
+	}
+	if dbCtx == nil {
+		return nil, fmt.Errorf("db context is required")
+	}
 	return &Controller{
 		pubsub:   pubsub,
 		executor: exec,
+		reader:   r,
+		dbCtx:    dbCtx,
 	}, nil
+}
+
+// Init выполняет начальную инициализацию:
+//  1. Применяет миграции outbox-таблицы (CREATE IF NOT EXISTS — идемпотентно).
+//  2. Запускает фоновый процесс reader (polling outbox → publish в брокер).
+//
+// Вызывать после Register, перед StartSaga.
+func (c *Controller) Init(ctx context.Context) error {
+	if err := c.runMigrations(ctx); err != nil {
+		return fmt.Errorf("init: migrations: %w", err)
+	}
+
+	c.reader.Start(ctx)
+	logger.Info("controller initialized: migrations applied, reader started")
+
+	return nil
+}
+
+// Close останавливает reader и блокируется до завершения фоновых процессов (graceful shutdown).
+func (c *Controller) Close() {
+	c.reader.Close()
+}
+
+// runMigrations применяет миграции outbox-таблицы в транзакции.
+func (c *Controller) runMigrations(ctx context.Context) error {
+	migrationSQL, err := c.migrationSQL()
+	if err != nil {
+		return err
+	}
+
+	tx, err := c.dbCtx.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, migrationSQL); err != nil {
+		return fmt.Errorf("exec migration: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration tx: %w", err)
+	}
+
+	return nil
+}
+
+// migrationSQL возвращает SQL миграции для текущего диалекта.
+func (c *Controller) migrationSQL() (string, error) {
+	switch c.dbCtx.Dialect() {
+	case databases.SQLDialectPostgres:
+		return migrations.PostgresOutboxMigration, nil
+	default:
+		return "", fmt.Errorf("unsupported dialect for migrations: %s", c.dbCtx.Dialect())
+	}
 }
 
 // Register подписывается на топик и направляет входящие сообщения в соответствующий шаг.

@@ -79,7 +79,7 @@ func main() {
 	}
 
 	// 6. Создаём Controller — подписка на топики и маршрутизация
-	ctrl, err := controller.New(&stubPubsub{}, exec)
+	ctrl, err := controller.New(&stubPubsub{}, exec, r, dbCtx)
 	if err != nil {
 		log.Fatalf("failed to create controller: %v", err)
 	}
@@ -157,9 +157,11 @@ func main() {
 		log.Fatalf("failed to register step: %v", err)
 	}
 
-	// 9. Запускаем Reader (фоновый поллинг outbox -> publish в брокер)
-	r.Start(ctx)
-	defer r.Close()
+	// 9. Инициализация: миграции + запуск Reader (фоновый поллинг outbox -> publish)
+	if err := ctrl.Init(ctx); err != nil {
+		log.Fatalf("failed to init controller: %v", err)
+	}
+	defer ctrl.Close()
 
 	// 10. Запуск обработки ошибок Reader'а в фоне
 	go func() {

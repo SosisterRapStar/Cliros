@@ -129,11 +129,15 @@ func (r *Reader) Start(userCtx context.Context) {
 	)
 }
 
+// Close останавливает reader и блокируется до завершения горутины поллинга (graceful shutdown).
+// Текущий обрабатываемый батч будет допроцессен перед выходом.
+// Безопасен для повторного вызова.
 func (r *Reader) Close() {
 	if !atomic.CompareAndSwapInt32(&r.closed, 0, 1) {
 		return
 	}
 	r.cancelCtx()
+	r.wg.Wait()
 }
 
 func (r *Reader) polling(userCtx context.Context) {
