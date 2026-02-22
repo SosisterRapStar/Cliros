@@ -8,6 +8,7 @@ import (
 	"github.com/bytedance/gopkg/util/logger"
 
 	"github.com/SosisterRapStar/LETI-paper/domain/databases"
+	"github.com/SosisterRapStar/LETI-paper/domain/inbox"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/SosisterRapStar/LETI-paper/domain/outbox/writer"
 	"github.com/SosisterRapStar/LETI-paper/domain/step"
@@ -26,15 +27,17 @@ import (
 type StepExecutor struct {
 	db           databases.DB
 	writer       *writer.Writer
+	inbox        *inbox.Inbox
 	infraRetrier *retrier.Retrier
 }
 
 // New создаёт новый StepExecutor.
 //   - db — соединение с базой данных для создания транзакций.
 //   - w — writer для записи в outbox.
+//   - inbox — для дедупликации входящих сообщений (inbox-паттерн); может быть nil — тогда claim не выполняется.
 //   - infraRetrier — политика retry для инфраструктурных ошибок (BeginTx, Commit, WriteOutbox).
 //     Может быть nil — в этом случае инфраструктурные операции выполняются без retry.
-func New(db databases.DB, w *writer.Writer, infraRetrier *retrier.Retrier) (*StepExecutor, error) {
+func New(db databases.DB, w *writer.Writer, inbox *inbox.Inbox, infraRetrier *retrier.Retrier) (*StepExecutor, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db is required")
 	}
@@ -44,6 +47,7 @@ func New(db databases.DB, w *writer.Writer, infraRetrier *retrier.Retrier) (*Ste
 	return &StepExecutor{
 		db:           db,
 		writer:       w,
+		inbox:        inbox,
 		infraRetrier: infraRetrier,
 	}, nil
 }
@@ -115,11 +119,12 @@ func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg m
 	return fmt.Errorf("compensation error handler failed: %w", handlerErr)
 }
 
-// atomicRun — одна попытка выполнения: BeginTx → action → WriteOutbox → Commit.
+// atomicRun — одна попытка выполнения: BeginTx → [inbox claim при from_step] → action → WriteOutbox → Commit.
 //
 // Классифицирует ошибки:
 //   - инфраструктурные (BeginTx, WriteMessages, Commit) → retrier.AsRetryable — infraRetrier повторит.
 //   - пользовательские (action) → actionError — infraRetrier остановится.
+//   - inbox.ErrDuplicate — входящее сообщение уже обработано (inbox), ACK без повторного выполнения.
 func (e *StepExecutor) atomicRun(
 	ctx context.Context,
 	stp *step.Step,
@@ -134,6 +139,16 @@ func (e *StepExecutor) atomicRun(
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	// Inbox: дедупликация входящих сообщений. Пропускаем для первого шага (StartSaga), когда from_step пустой.
+	if e.inbox != nil && msg.FromStep != "" {
+		if err := e.inbox.Claim(ctx, tx, msg); err != nil {
+			return err
+		}
+	}
+
+	// здесь нужно передавать в action ограниченный интерфейс Tx,
+	// чтобы у юзера не было возможности закоммитить или ролбэкнуть транзакцию внутри action
+	// чтобы он мог вызывать только Exec и Query
 	result, err := action(ctx, tx, msg)
 	if err != nil {
 		return &actionError{err: err}
@@ -221,6 +236,12 @@ func (e *StepExecutor) runErrorHandler(
 			return retrier.AsRetryable(fmt.Errorf("begin error handler tx: %w", txErr))
 		}
 		defer tx.Rollback() //nolint:errcheck
+
+		if e.inbox != nil && msg.FromStep != "" {
+			if claimErr := e.inbox.Claim(retryCtx, tx, msg); claimErr != nil {
+				return claimErr
+			}
+		}
 
 		result, handlerErr := handler(retryCtx, tx, msg, originalErr)
 		if handlerErr != nil {

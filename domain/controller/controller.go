@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/bytedance/gopkg/util/logger"
@@ -10,6 +11,7 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/domain/broker"
 	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/executor"
+	"github.com/SosisterRapStar/LETI-paper/domain/inbox"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/SosisterRapStar/LETI-paper/domain/outbox/migrations"
 	"github.com/SosisterRapStar/LETI-paper/domain/outbox/reader"
@@ -81,9 +83,13 @@ func (c *Controller) Close() {
 	c.reader.Close()
 }
 
-// runMigrations применяет миграции outbox-таблицы в транзакции.
+// runMigrations применяет миграции outbox и inbox в одной транзакции.
 func (c *Controller) runMigrations(ctx context.Context) error {
-	migrationSQL, err := c.migrationSQL()
+	outboxSQL, err := c.migrationOutboxSQL()
+	if err != nil {
+		return err
+	}
+	inboxSQL, err := c.migrationInboxSQL()
 	if err != nil {
 		return err
 	}
@@ -94,8 +100,11 @@ func (c *Controller) runMigrations(ctx context.Context) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	if _, err := tx.ExecContext(ctx, migrationSQL); err != nil {
-		return fmt.Errorf("exec migration: %w", err)
+	if _, err := tx.ExecContext(ctx, outboxSQL); err != nil {
+		return fmt.Errorf("exec outbox migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, inboxSQL); err != nil {
+		return fmt.Errorf("exec inbox migration: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -105,13 +114,25 @@ func (c *Controller) runMigrations(ctx context.Context) error {
 	return nil
 }
 
-// migrationSQL возвращает SQL миграции для текущего диалекта.
-func (c *Controller) migrationSQL() (string, error) {
+func (c *Controller) migrationOutboxSQL() (string, error) {
 	switch c.dbCtx.Dialect() {
 	case databases.SQLDialectPostgres:
 		return migrations.PostgresOutboxMigration, nil
+	case databases.SQLDialectMySQL:
+		return migrations.MySQLOutboxMigration, nil
 	default:
 		return "", fmt.Errorf("unsupported dialect for migrations: %s", c.dbCtx.Dialect())
+	}
+}
+
+func (c *Controller) migrationInboxSQL() (string, error) {
+	switch c.dbCtx.Dialect() {
+	case databases.SQLDialectPostgres:
+		return migrations.PostgresInboxMigration, nil
+	case databases.SQLDialectMySQL:
+		return migrations.MySQLInboxMigration, nil
+	default:
+		return "", fmt.Errorf("unsupported dialect for inbox migration: %s", c.dbCtx.Dialect())
 	}
 }
 
@@ -136,6 +157,9 @@ func (c *Controller) Register(topic string, stp *step.Step) error {
 		}
 
 		if actionErr != nil {
+			if errors.Is(actionErr, inbox.ErrDuplicate) {
+				return nil
+			}
 			logger.Warnf("action failed: %s", actionErr.Error())
 		}
 		return actionErr

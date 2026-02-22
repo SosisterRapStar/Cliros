@@ -3,6 +3,7 @@ module github.com/SosisterRapStar/LETI-paper
 go 1.25.4
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/bytedance/gopkg v0.1.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0

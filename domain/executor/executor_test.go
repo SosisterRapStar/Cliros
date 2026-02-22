@@ -76,7 +76,7 @@ func newRetrier(maxRetries uint) *retrier.Retrier {
 func newTestExecutor(mdb *mockDB, maxInfraRetries uint) *StepExecutor {
 	dbCtx := databases.NewDBContextWithDB(mdb, databases.SQLDialectPostgres)
 	w := writer.New(dbCtx)
-	exec, _ := New(mdb, w, newRetrier(maxInfraRetries))
+	exec, _ := New(mdb, w, nil, newRetrier(maxInfraRetries))
 	return exec
 }
 
@@ -152,7 +152,7 @@ func TestNew_Validation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(tt.db, tt.w, tt.ir)
+			_, err := New(tt.db, tt.w, nil, tt.ir)
 			if (err != nil) != tt.err {
 				t.Errorf("got error=%v, wantErr=%v", err, tt.err)
 			}
