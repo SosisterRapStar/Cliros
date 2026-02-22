@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	MaxRetriesExceeded = errors.New("max retries number achieved")
+	ErrMaxRetriesExceeded = errors.New("max retries number achieved")
 )
 
 type RetryableError struct {
@@ -60,7 +60,7 @@ func (r *Retrier) retry(ctx context.Context, work work) error {
 			return ctx.Err()
 		default:
 			if retries >= r.MaxRetries {
-				return MaxRetriesExceeded
+				return ErrMaxRetriesExceeded
 			}
 			err := work(ctx)
 			if !errors.As(err, &retryable) {

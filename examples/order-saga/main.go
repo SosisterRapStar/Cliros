@@ -16,6 +16,7 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/domain/controller"
 	"github.com/SosisterRapStar/LETI-paper/domain/databases"
 	"github.com/SosisterRapStar/LETI-paper/domain/executor"
+	"github.com/SosisterRapStar/LETI-paper/domain/inbox"
 	"github.com/SosisterRapStar/LETI-paper/domain/message"
 	"github.com/SosisterRapStar/LETI-paper/domain/outbox/reader"
 	"github.com/SosisterRapStar/LETI-paper/domain/outbox/writer"
@@ -72,8 +73,9 @@ func main() {
 		MaxRetries: 10, //nolint:mnd
 	}
 
-	// 5. Создаём StepExecutor — управляет транзакциями и retry
-	exec, err := executor.New(dbCtx.DB(), w, infraRetrier)
+	// 5. Inbox для дедупликации входящих сообщений и StepExecutor
+	inboxSvc := inbox.New(dbCtx)
+	exec, err := executor.New(dbCtx.DB(), w, inboxSvc, infraRetrier)
 	if err != nil {
 		log.Fatalf("failed to create executor: %v", err)
 	}

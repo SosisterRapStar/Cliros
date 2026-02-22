@@ -52,7 +52,7 @@ func (e ExpontentialWithJitter) CalcBackoff(retryNumber uint, minBackoff, maxBac
 		cappedBackoff = baseBackoff
 	}
 
-	jitteredBackoff := rand.Float64() * cappedBackoff
+	jitteredBackoff := rand.Float64() * cappedBackoff //nolint: gosec
 
 	result := math.Max(jitteredBackoff, float64(minBackoff))
 

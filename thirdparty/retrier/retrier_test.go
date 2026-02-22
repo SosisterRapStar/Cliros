@@ -63,7 +63,7 @@ func TestRetryableError(t *testing.T) {
 	})
 }
 
-func TestRetrier_Retry(t *testing.T) {
+func TestRetrier_Retry(t *testing.T) { //nolint: gocyclo
 	t.Run("success on first attempt", func(t *testing.T) {
 		retrier := &Retrier{
 			BackoffOptions: BackoffOptions{
@@ -131,7 +131,7 @@ func TestRetrier_Retry(t *testing.T) {
 			return AsRetryable(errors.New("always fails"))
 		})
 
-		if !errors.Is(err, MaxRetriesExceeded) {
+		if !errors.Is(err, ErrMaxRetriesExceeded) {
 			t.Errorf("expected MaxRetriesExceeded, got %v", err)
 		}
 		if attempts != 3 {
@@ -187,7 +187,7 @@ func TestRetrier_Retry(t *testing.T) {
 			t.Errorf("expected context.Canceled, got %v", err)
 		}
 		if attempts != 0 {
-			t.Errorf("expected 0 attempts (cancelled before first), got %d", attempts)
+			t.Errorf("expected 0 attempts (canceled before first), got %d", attempts)
 		}
 	})
 
@@ -262,7 +262,7 @@ func TestRetrier_Retry(t *testing.T) {
 			return AsRetryable(errors.New("always fails"))
 		})
 
-		if !errors.Is(err, MaxRetriesExceeded) {
+		if !errors.Is(err, ErrMaxRetriesExceeded) {
 			t.Errorf("expected MaxRetriesExceeded, got %v", err)
 		}
 		if attempts != 0 {
@@ -336,7 +336,7 @@ func TestSleep(t *testing.T) {
 		}
 	})
 
-	t.Run("sleep is cancelled by context", func(t *testing.T) {
+	t.Run("sleep is canceled by context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
@@ -348,11 +348,11 @@ func TestSleep(t *testing.T) {
 			t.Errorf("expected context.Canceled, got %v", err)
 		}
 		if duration >= 200*time.Millisecond {
-			t.Errorf("expected sleep to be cancelled quickly, got %v", duration)
+			t.Errorf("expected sleep to be canceled quickly, got %v", duration)
 		}
 	})
 
-	t.Run("sleep is cancelled by timeout", func(t *testing.T) {
+	t.Run("sleep is canceled by timeout", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 		defer cancel()
 
@@ -364,7 +364,7 @@ func TestSleep(t *testing.T) {
 			t.Errorf("expected context.DeadlineExceeded, got %v", err)
 		}
 		if duration >= 200*time.Millisecond {
-			t.Errorf("expected sleep to be cancelled quickly, got %v", duration)
+			t.Errorf("expected sleep to be canceled quickly, got %v", duration)
 		}
 	})
 }

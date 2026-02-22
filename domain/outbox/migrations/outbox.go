@@ -23,4 +23,27 @@ var (
 	CREATE INDEX IF NOT EXISTS idx_saga_outbox_created_at ON saga.outbox (created_at);
 	CREATE INDEX IF NOT EXISTS idx_saga_outbox_scheduled_at ON saga.outbox (scheduled_at);
 	`
+	MySQLOutboxMigration = `
+	CREATE DATABASE IF NOT EXISTS saga;
+	USE saga;
+
+	CREATE TABLE IF NOT EXISTS outbox (
+		saga_id             CHAR(36) NOT NULL,
+		step_name           VARCHAR(255) NOT NULL,
+		topic               VARCHAR(255) NOT NULL,
+		created_at          DATETIME NOT NULL,
+		scheduled_at        DATETIME,
+		metadata            LONGBLOB,
+		payload             LONGBLOB NOT NULL,
+		attempts_counter    INT DEFAULT 0,
+		last_attempt        DATETIME,
+		processed_at        DATETIME,
+		
+		PRIMARY KEY (saga_id, step_name)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+	CREATE INDEX idx_outbox_topic ON outbox (topic);
+	CREATE INDEX idx_outbox_created_at ON outbox (created_at);
+	CREATE INDEX idx_outbox_scheduled_at ON outbox (scheduled_at);
+	`
 )
