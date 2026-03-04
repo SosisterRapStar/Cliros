@@ -8,7 +8,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/message"
+	"github.com/SosisterRapStar/LETI-paper/message"
 )
 
 type Client struct {
@@ -76,7 +76,7 @@ func (c *Client) Subscribe(ctx context.Context, topic string, handler func(ctx c
 			return
 		}
 
-		if err := handler(context.Background(), message); err != nil { // вызывается пользовательский обработчик
+		if err := handler(context.Background(), message); err != nil {
 			return
 		}
 	})

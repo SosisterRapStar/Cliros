@@ -9,8 +9,8 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/databases"
-	"github.com/SosisterRapStar/LETI-paper/domain/message"
+	"github.com/SosisterRapStar/LETI-paper/database"
+	"github.com/SosisterRapStar/LETI-paper/message"
 )
 
 const testSagaID = "01234567-89ab-cdef-0123-456789abcdef"
@@ -24,7 +24,7 @@ func TestInbox_Claim_Postgres_Success(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
 	in := New(dbCtx)
 	ctx := context.Background()
 	sagaUUID := uuid.MustParse(testSagaID)
@@ -60,7 +60,7 @@ func TestInbox_Claim_Postgres_Duplicate(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
 	in := New(dbCtx)
 	ctx := context.Background()
 	msg := message.Message{MessageMeta: message.MessageMeta{SagaID: testSagaID, FromStep: "order-service"}}
@@ -98,7 +98,7 @@ func TestInbox_Claim_InvalidSagaID(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
 	in := New(dbCtx)
 	ctx := context.Background()
 	msg := message.Message{MessageMeta: message.MessageMeta{SagaID: "not-a-uuid", FromStep: "order-service"}}
@@ -132,7 +132,7 @@ func TestInbox_Claim_Postgres_QueryError(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
 	in := New(dbCtx)
 	ctx := context.Background()
 	msg := message.Message{MessageMeta: message.MessageMeta{SagaID: testSagaID, FromStep: "order-service"}}
@@ -170,7 +170,7 @@ func TestInbox_Claim_MySQL_Success(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectMySQL)
+	dbCtx := database.NewDBContext(db, database.SQLDialectMySQL)
 	in := New(dbCtx)
 	ctx := context.Background()
 	msg := message.Message{MessageMeta: message.MessageMeta{SagaID: testSagaID, FromStep: "order-service"}}
@@ -205,7 +205,7 @@ func TestInbox_Claim_MySQL_Duplicate(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectMySQL)
+	dbCtx := database.NewDBContext(db, database.SQLDialectMySQL)
 	in := New(dbCtx)
 	ctx := context.Background()
 	msg := message.Message{MessageMeta: message.MessageMeta{SagaID: testSagaID, FromStep: "order-service"}}
@@ -243,7 +243,7 @@ func TestInbox_Claim_UnsupportedDialect(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialect("oracle"))
+	dbCtx := database.NewDBContext(db, database.SQLDialect("oracle"))
 	in := New(dbCtx)
 	ctx := context.Background()
 	msg := message.Message{MessageMeta: message.MessageMeta{SagaID: testSagaID, FromStep: "step1"}}

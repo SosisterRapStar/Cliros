@@ -1,4 +1,4 @@
-package reader
+package outbox
 
 import (
 	"context"
@@ -8,11 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/broker"
-	"github.com/SosisterRapStar/LETI-paper/domain/databases"
-	"github.com/SosisterRapStar/LETI-paper/domain/message"
-	"github.com/SosisterRapStar/LETI-paper/domain/outbox"
-	"github.com/SosisterRapStar/LETI-paper/thirdparty/backoff"
+	"github.com/SosisterRapStar/LETI-paper/backoff"
+	"github.com/SosisterRapStar/LETI-paper/broker"
+	"github.com/SosisterRapStar/LETI-paper/database"
+	"github.com/SosisterRapStar/LETI-paper/message"
 )
 
 const (
@@ -20,43 +19,30 @@ const (
 	defaultBatchSize = 10
 )
 
-// Настройки бэкоффа, решает, на какое время запланировать ретрай сообщения
+// BackoffSettings настройки бэкоффа, решает, на какое время запланировать ретрай сообщения
 type BackoffSettings struct {
 	backoffPolicy backoff.BackoffPolicy
 	backoffMin    time.Duration
 	backoffMax    time.Duration
 }
 
-// Настройки поллера, решает как часто будут политься сообщения и сколько сообщений будет вычитано
+// PollingSettings настройки поллера, решает как часто будут политься сообщения и сколько сообщений будет вычитано
 type PollingSettings struct {
-	// Интервал через который ходим в базку
-	interval time.Duration
-	// Размер батча, который вытаскиваем из базы
+	interval  time.Duration
 	batchSize int
 }
 
 type Reader struct {
-	// Объект паблишера, через который публикуем сообщения
-	Publisher broker.Publisher
-	// Настройки и опции
+	Publisher       broker.Publisher
 	PollingSettings PollingSettings
 	BackoffSettings BackoffSettings
-	// Абстракция над базой данных
-	dbCtx *databases.DBContext
+	dbCtx           *database.DBContext
 
-	// переиспользуемый буффер для паршеных сообщений
-	// предпологается, что при рантайме приложения, на Reader будет выделяться только 1 горутина
-	// поэтому не думаем о конкурентности в этом плане здесь
-	// нужно не забыть, что после того когда создали такой буфер, его размеры нельзя менять никогда и не при каких условиях
-	// пусть пока что будет так, что пользователь не сможет поменять буфер в рантайме, ему придется перезапускать приложение
-	buffer []*outbox.OutboxMessage
+	buffer []*OutboxMessage
 
-	// Переменная, что стартовали
 	started int32
-	// Переменная, что закрылись
-	closed int32
+	closed  int32
 
-	// Банч оф булщит
 	closeCtx  context.Context
 	cancelCtx context.CancelFunc
 	wg        sync.WaitGroup
@@ -82,7 +68,7 @@ func NewPollingSettings(interval time.Duration, batchSize int) PollingSettings {
 	}
 }
 
-func New(dbCtx *databases.DBContext, publisher broker.Publisher, polling PollingSettings, boff BackoffSettings, errCh chan<- error) *Reader {
+func NewReader(dbCtx *database.DBContext, publisher broker.Publisher, polling PollingSettings, boff BackoffSettings, errCh chan<- error) *Reader {
 	batchSize := polling.batchSize
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
@@ -90,9 +76,9 @@ func New(dbCtx *databases.DBContext, publisher broker.Publisher, polling Polling
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	buffer := make([]*outbox.OutboxMessage, batchSize)
+	buffer := make([]*OutboxMessage, batchSize)
 	for i := range buffer {
-		buffer[i] = &outbox.OutboxMessage{}
+		buffer[i] = &OutboxMessage{}
 	}
 
 	return &Reader{
@@ -145,20 +131,12 @@ func (r *Reader) polling(userCtx context.Context) {
 	defer ticker.Stop()
 	for {
 		select {
-		// если закрыли ридер
 		case <-r.closeCtx.Done():
 			return
 
-		// если юзер ctx отработал
 		case <-userCtx.Done():
 			return
 
-		// TODO: такая логика тут как-будто не подходит
-		// TODO: в будущем заменить такую логику на другую
-		// мы должны опираться на то с какой скоростью отработает функция вычитки
-		// если что-то пойдет не так и будет отправлять или читать сообщения долго
-		// то тикер захочет сложить 2 тика в канал и таким образом после обработки сообщений
-		// сразу подхватим следующий тик - а мы бы хотели подождать время следующего полла, без учитывания походов в бд и кафку
 		case <-ticker.C:
 			readed, err := r.scanBatch(userCtx)
 			if err != nil {
@@ -181,14 +159,11 @@ func (r *Reader) sendError(err error) {
 	}
 }
 
-func (r *Reader) processMessage(ctx context.Context, msg *outbox.OutboxMessage) error {
+func (r *Reader) processMessage(ctx context.Context, msg *OutboxMessage) error {
 	sagaMsg, err := fromOutboxToSagaMessage(msg)
 	if err != nil {
 		return err
 	}
-	// TODO: нужно добавить свои собственные ошибки, чтобы как-то различать,
-	// какие ошибки пришли от паблишера и связаны ли они вообще с сообщениями
-	// обязательно их логировать
 	if err := r.Publisher.Publish(ctx, msg.Topic, sagaMsg); err != nil {
 		r.sendError(fmt.Errorf("outbox publish [saga_id=%s, step=%s]: %w", msg.SagaID, msg.StepName, err))
 		r.handlePublishError(ctx, msg)
@@ -198,7 +173,7 @@ func (r *Reader) processMessage(ctx context.Context, msg *outbox.OutboxMessage) 
 	return nil
 }
 
-func (r *Reader) handlePublishError(ctx context.Context, msg *outbox.OutboxMessage) {
+func (r *Reader) handlePublishError(ctx context.Context, msg *OutboxMessage) {
 	attemptTime := time.Now()
 	nextAttempt := r.calculateNextAttempt(msg)
 	if err := r.updateOutboxOnErr(ctx, msg, attemptTime, nextAttempt); err != nil {
@@ -206,13 +181,13 @@ func (r *Reader) handlePublishError(ctx context.Context, msg *outbox.OutboxMessa
 	}
 }
 
-func (r *Reader) handlePublishSuccess(ctx context.Context, msg *outbox.OutboxMessage) {
+func (r *Reader) handlePublishSuccess(ctx context.Context, msg *OutboxMessage) {
 	if err := r.updateOutboxOnSuccess(ctx, msg, time.Now()); err != nil {
 		r.sendError(fmt.Errorf("outbox update on success [saga_id=%s, step=%s]: %w", msg.SagaID, msg.StepName, err))
 	}
 }
 
-func (r *Reader) calculateNextAttempt(msg *outbox.OutboxMessage) time.Time {
+func (r *Reader) calculateNextAttempt(msg *OutboxMessage) time.Time {
 	backoffDuration := r.BackoffSettings.backoffPolicy.CalcBackoff(
 		msg.AttemptCounter,
 		r.BackoffSettings.backoffMin,
@@ -266,7 +241,7 @@ WHERE
 
 func (r *Reader) updateOutboxOnSuccess(
 	ctx context.Context,
-	msg *outbox.OutboxMessage,
+	msg *OutboxMessage,
 	processedAt time.Time,
 ) error {
 	tx, err := r.dbCtx.DB().BeginTx(ctx, nil)
@@ -285,7 +260,7 @@ func (r *Reader) updateOutboxOnSuccess(
 
 func (r *Reader) updateOutboxOnErr(
 	ctx context.Context,
-	msg *outbox.OutboxMessage,
+	msg *OutboxMessage,
 	lastAttempt, nextAttempt time.Time,
 ) error {
 	tx, err := r.dbCtx.DB().BeginTx(ctx, nil)
@@ -302,7 +277,7 @@ func (r *Reader) updateOutboxOnErr(
 	return tx.Commit()
 }
 
-func fromOutboxToSagaMessage(oMsg *outbox.OutboxMessage) (message.Message, error) {
+func fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, error) {
 	var (
 		meta    message.MessageMeta
 		payload message.MessagePayload

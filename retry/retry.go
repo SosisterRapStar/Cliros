@@ -1,11 +1,11 @@
-package retrier
+package retry
 
 import (
 	"context"
 	"errors"
 	"time"
 
-	"github.com/SosisterRapStar/LETI-paper/thirdparty/backoff"
+	"github.com/SosisterRapStar/LETI-paper/backoff"
 )
 
 var (
@@ -74,7 +74,7 @@ func (r *Retrier) retry(ctx context.Context, work work) error {
 					),
 			)
 			if err != nil {
-				return err // эту ошибку всегда возвращаем - она от CTX
+				return err
 			}
 			retries++
 		}

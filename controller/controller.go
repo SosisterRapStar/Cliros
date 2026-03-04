@@ -4,19 +4,56 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/google/uuid"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/broker"
-	"github.com/SosisterRapStar/LETI-paper/domain/databases"
-	"github.com/SosisterRapStar/LETI-paper/domain/executor"
-	"github.com/SosisterRapStar/LETI-paper/domain/inbox"
-	"github.com/SosisterRapStar/LETI-paper/domain/message"
-	"github.com/SosisterRapStar/LETI-paper/domain/outbox/migrations"
-	"github.com/SosisterRapStar/LETI-paper/domain/outbox/reader"
-	"github.com/SosisterRapStar/LETI-paper/domain/step"
+	"github.com/SosisterRapStar/LETI-paper/backoff"
+	"github.com/SosisterRapStar/LETI-paper/broker"
+	"github.com/SosisterRapStar/LETI-paper/database"
+	"github.com/SosisterRapStar/LETI-paper/internal/executor"
+	"github.com/SosisterRapStar/LETI-paper/internal/inbox"
+	"github.com/SosisterRapStar/LETI-paper/internal/outbox"
+	"github.com/SosisterRapStar/LETI-paper/message"
+	"github.com/SosisterRapStar/LETI-paper/retry"
+	"github.com/SosisterRapStar/LETI-paper/step"
 )
+
+const (
+	defaultPollInterval = 1 * time.Second
+	defaultBatchSize    = 10
+	defaultBackoffMin   = 100 * time.Millisecond
+	defaultBackoffMax   = 1 * time.Minute
+)
+
+// Config содержит параметры для создания Controller.
+// Subscriber и Publisher обязательны — без них невозможна работа с брокером.
+// DB обязательна — без неё невозможна работа с outbox/inbox.
+type Config struct {
+	Subscriber broker.Subsciber
+	Publisher  broker.Publisher
+	DB         *database.DBContext
+
+	// InfraRetry — политика retry для инфраструктурных ошибок (BeginTx, Commit, WriteOutbox).
+	// Если nil — инфраструктурные операции выполняются без retry.
+	InfraRetry *retry.Retrier
+
+	// PollInterval — интервал поллинга outbox-таблицы (default: 1s).
+	PollInterval time.Duration
+	// BatchSize — размер батча при вычитке из outbox (default: 10).
+	BatchSize int
+
+	// BackoffPolicy — политика бэкоффа для ретрая публикации сообщений из outbox (default: Exponential).
+	BackoffPolicy backoff.BackoffPolicy
+	// BackoffMin — минимальный бэкофф (default: 100ms).
+	BackoffMin time.Duration
+	// BackoffMax — максимальный бэкофф (default: 1min).
+	BackoffMax time.Duration
+
+	// ErrCh — канал для ошибок Reader'а (неблокирующая отправка). Если nil — ошибки теряются.
+	ErrCh chan<- error
+}
 
 type Saga interface {
 	Register(string, *step.Step) error
@@ -32,33 +69,73 @@ type Saga interface {
 type Controller struct {
 	pubsub   broker.Subsciber
 	executor *executor.StepExecutor
-	reader   *reader.Reader
-	dbCtx    *databases.DBContext
+	reader   *outbox.Reader
+	dbCtx    *database.DBContext
 }
 
-func New(
-	pubsub broker.Subsciber,
-	exec *executor.StepExecutor,
-	r *reader.Reader,
-	dbCtx *databases.DBContext,
-) (*Controller, error) {
-	if pubsub == nil {
-		return nil, fmt.Errorf("pubsub is required")
+func New(cfg *Config) (*Controller, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
 	}
-	if exec == nil {
-		return nil, fmt.Errorf("executor is required")
+	if cfg.Subscriber == nil {
+		return nil, fmt.Errorf("subscriber is required")
 	}
-	if r == nil {
-		return nil, fmt.Errorf("reader is required")
+	if cfg.Publisher == nil {
+		return nil, fmt.Errorf("publisher is required")
 	}
-	if dbCtx == nil {
+	if cfg.DB == nil {
 		return nil, fmt.Errorf("db context is required")
 	}
+
+	pollInterval := cfg.PollInterval
+	if pollInterval == 0 {
+		pollInterval = defaultPollInterval
+	}
+	batchSize := cfg.BatchSize
+	if batchSize == 0 {
+		batchSize = defaultBatchSize
+	}
+	backoffPolicy := cfg.BackoffPolicy
+	if backoffPolicy == nil {
+		backoffPolicy = backoff.Expontential{}
+	}
+	backoffMin := cfg.BackoffMin
+	if backoffMin == 0 {
+		backoffMin = defaultBackoffMin
+	}
+	backoffMax := cfg.BackoffMax
+	if backoffMax == 0 {
+		backoffMax = defaultBackoffMax
+	}
+
+	errCh := cfg.ErrCh
+	if errCh == nil {
+		sink := make(chan error, 1)
+		go func() {
+			for range sink {
+			}
+		}()
+		errCh = sink
+	}
+
+	w := outbox.NewWriter(cfg.DB)
+
+	polling := outbox.NewPollingSettings(pollInterval, batchSize)
+	boff := outbox.NewBackoffSettings(backoffPolicy, backoffMin, backoffMax)
+	r := outbox.NewReader(cfg.DB, cfg.Publisher, polling, boff, errCh)
+
+	inboxSvc := inbox.New(cfg.DB)
+
+	exec, err := executor.New(cfg.DB.DB(), w, inboxSvc, cfg.InfraRetry)
+	if err != nil {
+		return nil, fmt.Errorf("creating executor: %w", err)
+	}
+
 	return &Controller{
-		pubsub:   pubsub,
+		pubsub:   cfg.Subscriber,
 		executor: exec,
 		reader:   r,
-		dbCtx:    dbCtx,
+		dbCtx:    cfg.DB,
 	}, nil
 }
 
@@ -116,10 +193,10 @@ func (c *Controller) runMigrations(ctx context.Context) error {
 
 func (c *Controller) migrationOutboxSQL() (string, error) {
 	switch c.dbCtx.Dialect() {
-	case databases.SQLDialectPostgres:
-		return migrations.PostgresOutboxMigration, nil
-	case databases.SQLDialectMySQL:
-		return migrations.MySQLOutboxMigration, nil
+	case database.SQLDialectPostgres:
+		return outbox.PostgresOutboxMigration, nil
+	case database.SQLDialectMySQL:
+		return outbox.MySQLOutboxMigration, nil
 	default:
 		return "", fmt.Errorf("unsupported dialect for migrations: %s", c.dbCtx.Dialect())
 	}
@@ -127,10 +204,10 @@ func (c *Controller) migrationOutboxSQL() (string, error) {
 
 func (c *Controller) migrationInboxSQL() (string, error) {
 	switch c.dbCtx.Dialect() {
-	case databases.SQLDialectPostgres:
-		return migrations.PostgresInboxMigration, nil
-	case databases.SQLDialectMySQL:
-		return migrations.MySQLInboxMigration, nil
+	case database.SQLDialectPostgres:
+		return outbox.PostgresInboxMigration, nil
+	case database.SQLDialectMySQL:
+		return outbox.MySQLInboxMigration, nil
 	default:
 		return "", fmt.Errorf("unsupported dialect for inbox migration: %s", c.dbCtx.Dialect())
 	}

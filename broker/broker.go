@@ -3,11 +3,8 @@ package broker
 import (
 	"context"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/message"
+	"github.com/SosisterRapStar/LETI-paper/message"
 )
-
-// чтобы работать с библиотекой, пабсаб для обмена сообщениями должен реализовывать такой интерфейс
-// нужен еще какокой-нибудь высококровневый интерфейс
 
 type Publisher interface {
 	Publish(ctx context.Context, topic string, message message.Message) error

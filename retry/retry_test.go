@@ -1,4 +1,4 @@
-package retrier
+package retry
 
 import (
 	"context"
@@ -434,8 +434,6 @@ func TestRetrier_WithExponentialBackoff(t *testing.T) {
 			t.Errorf("expected 3 attempts, got %d", attempts)
 		}
 		// Проверяем, что была задержка между попытками
-		// retryNumber=0: minBackoff (10ms), retryNumber=1: minBackoff (10ms) так как 1+0*2=1 < 10ms
-		// Минимум должна быть хотя бы одна задержка
 		if duration < 5*time.Millisecond {
 			t.Errorf("expected some backoff delay, got %v", duration)
 		}

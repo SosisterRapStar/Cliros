@@ -1,4 +1,4 @@
-package writer
+package outbox
 
 import (
 	"context"
@@ -8,15 +8,15 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/databases"
-	"github.com/SosisterRapStar/LETI-paper/domain/message"
+	"github.com/SosisterRapStar/LETI-paper/database"
+	"github.com/SosisterRapStar/LETI-paper/message"
 )
 
-const testSagaID = "01234567-89ab-cdef-0123-456789abcdef"
+const testWriterSagaID = "01234567-89ab-cdef-0123-456789abcdef"
 
 func testMessage() message.Message {
 	return message.Message{
-		MessageMeta:    message.MessageMeta{SagaID: testSagaID, FromStep: "order-service"},
+		MessageMeta:    message.MessageMeta{SagaID: testWriterSagaID, FromStep: "order-service"},
 		MessagePayload: message.MessagePayload{Payload: map[string]any{"order_id": "123"}},
 	}
 }
@@ -30,8 +30,8 @@ func TestWriter_WriteMessages_Success_OneTopic(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	mock.ExpectBegin()
@@ -43,7 +43,7 @@ func TestWriter_WriteMessages_Success_OneTopic(t *testing.T) {
 
 	mock.ExpectExec("INSERT INTO saga.outbox").
 		WithArgs(
-			uuid.MustParse(testSagaID),
+			uuid.MustParse(testWriterSagaID),
 			"order-service",
 			"payment.process",
 			sqlmock.AnyArg(),
@@ -72,8 +72,8 @@ func TestWriter_WriteMessages_Success_TwoTopics(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	mock.ExpectBegin()
@@ -109,8 +109,8 @@ func TestWriter_WriteMessages_InvalidSagaID(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	mock.ExpectBegin()
@@ -142,8 +142,8 @@ func TestWriter_WriteMessages_ExecError(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	mock.ExpectBegin()
@@ -176,8 +176,8 @@ func TestWriter_WriteTx_Success(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	mock.ExpectBegin()
@@ -205,12 +205,12 @@ func TestWriter_WriteTx_Success_WithTxWorkFunc(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	var fnCalled bool
-	fn := func(_ context.Context, _ databases.TxQueryer) error {
+	fn := func(_ context.Context, _ database.TxQueryer) error {
 		fnCalled = true
 		return nil
 	}
@@ -242,8 +242,8 @@ func TestWriter_WriteTx_BeginError(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	mock.ExpectBegin().WillReturnError(sql.ErrConnDone)
@@ -266,8 +266,8 @@ func TestWriter_WriteTx_CommitError(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	mock.ExpectBegin()
@@ -295,12 +295,12 @@ func TestWriter_WriteTx_FnError(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	fnErr := sql.ErrNoRows
-	fn := func(_ context.Context, _ databases.TxQueryer) error {
+	fn := func(_ context.Context, _ database.TxQueryer) error {
 		return fnErr
 	}
 
@@ -329,8 +329,8 @@ func TestWriter_WriteMessages_EmptyTopics(t *testing.T) {
 	}
 	defer db.Close()
 
-	dbCtx := databases.NewDBContext(db, databases.SQLDialectPostgres)
-	w := New(dbCtx)
+	dbCtx := database.NewDBContext(db, database.SQLDialectPostgres)
+	w := NewWriter(dbCtx)
 	ctx := context.Background()
 
 	mock.ExpectBegin()

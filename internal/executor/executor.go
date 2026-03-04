@@ -7,12 +7,12 @@ import (
 
 	"github.com/bytedance/gopkg/util/logger"
 
-	"github.com/SosisterRapStar/LETI-paper/domain/databases"
-	"github.com/SosisterRapStar/LETI-paper/domain/inbox"
-	"github.com/SosisterRapStar/LETI-paper/domain/message"
-	"github.com/SosisterRapStar/LETI-paper/domain/outbox/writer"
-	"github.com/SosisterRapStar/LETI-paper/domain/step"
-	"github.com/SosisterRapStar/LETI-paper/thirdparty/retrier"
+	"github.com/SosisterRapStar/LETI-paper/database"
+	"github.com/SosisterRapStar/LETI-paper/internal/inbox"
+	"github.com/SosisterRapStar/LETI-paper/internal/outbox"
+	"github.com/SosisterRapStar/LETI-paper/message"
+	"github.com/SosisterRapStar/LETI-paper/retry"
+	"github.com/SosisterRapStar/LETI-paper/step"
 )
 
 // StepExecutor — атомарная единица "действие + транзакция + outbox".
@@ -25,10 +25,10 @@ import (
 //
 // Инфраструктурные ошибки не расходуют бюджет пользовательского retry и наоборот.
 type StepExecutor struct {
-	db           databases.DB
-	writer       *writer.Writer
+	db           database.DB
+	writer       *outbox.Writer
 	inbox        *inbox.Inbox
-	infraRetrier *retrier.Retrier
+	infraRetrier *retry.Retrier
 }
 
 // New создаёт новый StepExecutor.
@@ -37,7 +37,7 @@ type StepExecutor struct {
 //   - inbox — для дедупликации входящих сообщений (inbox-паттерн); может быть nil — тогда claim не выполняется.
 //   - infraRetrier — политика retry для инфраструктурных ошибок (BeginTx, Commit, WriteOutbox).
 //     Может быть nil — в этом случае инфраструктурные операции выполняются без retry.
-func New(db databases.DB, w *writer.Writer, inbox *inbox.Inbox, infraRetrier *retrier.Retrier) (*StepExecutor, error) {
+func New(db database.DB, w *outbox.Writer, inbox *inbox.Inbox, infraRetrier *retry.Retrier) (*StepExecutor, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db is required")
 	}
@@ -122,7 +122,7 @@ func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg m
 // atomicRun — одна попытка выполнения: BeginTx → [inbox claim при from_step] → action → WriteOutbox → Commit.
 //
 // Классифицирует ошибки:
-//   - инфраструктурные (BeginTx, WriteMessages, Commit) → retrier.AsRetryable — infraRetrier повторит.
+//   - инфраструктурные (BeginTx, WriteMessages, Commit) → retry.AsRetryable — infraRetrier повторит.
 //   - пользовательские (action) → actionError — infraRetrier остановится.
 //   - inbox.ErrDuplicate — входящее сообщение уже обработано (inbox), ACK без повторного выполнения.
 func (e *StepExecutor) atomicRun(
@@ -135,20 +135,16 @@ func (e *StepExecutor) atomicRun(
 ) error {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
-		return retrier.AsRetryable(fmt.Errorf("begin tx: %w", err))
+		return retry.AsRetryable(fmt.Errorf("begin tx: %w", err))
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Inbox: дедупликация входящих сообщений. Пропускаем для первого шага (StartSaga), когда from_step пустой.
 	if e.inbox != nil && msg.FromStep != "" {
 		if err := e.inbox.Claim(ctx, tx, msg); err != nil {
 			return err
 		}
 	}
 
-	// здесь нужно передавать в action ограниченный интерфейс Tx,
-	// чтобы у юзера не было возможности закоммитить или ролбэкнуть транзакцию внутри action
-	// чтобы он мог вызывать только Exec и Query
 	result, err := action(ctx, tx, msg)
 	if err != nil {
 		return &actionError{err: err}
@@ -161,12 +157,12 @@ func (e *StepExecutor) atomicRun(
 		result.FromStep = stp.Name()
 
 		if err := e.writer.WriteMessages(ctx, result, tx, topics, stp.Name()); err != nil {
-			return retrier.AsRetryable(fmt.Errorf("outbox write: %w", err))
+			return retry.AsRetryable(fmt.Errorf("outbox write: %w", err))
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return retrier.AsRetryable(fmt.Errorf("commit tx: %w", err))
+		return retry.AsRetryable(fmt.Errorf("commit tx: %w", err))
 	}
 
 	return nil
@@ -207,7 +203,7 @@ func (e *StepExecutor) runWithUserRetry(
 	action step.Action,
 	eventType message.MessageType,
 	topics []string,
-	userRetryPolicy *retrier.Retrier,
+	userRetryPolicy *retry.Retrier,
 ) error {
 	if userRetryPolicy == nil {
 		return e.runWithInfraRetry(ctx, stp, msg, action, eventType, topics)
@@ -233,7 +229,7 @@ func (e *StepExecutor) runErrorHandler(
 	err := e.retryInfra(ctx, func(retryCtx context.Context) error {
 		tx, txErr := e.db.BeginTx(retryCtx, nil)
 		if txErr != nil {
-			return retrier.AsRetryable(fmt.Errorf("begin error handler tx: %w", txErr))
+			return retry.AsRetryable(fmt.Errorf("begin error handler tx: %w", txErr))
 		}
 		defer tx.Rollback() //nolint:errcheck
 
@@ -255,12 +251,12 @@ func (e *StepExecutor) runErrorHandler(
 			result.FromStep = stp.Name()
 
 			if writeErr := e.writer.WriteMessages(retryCtx, result, tx, topics, stp.Name()); writeErr != nil {
-				return retrier.AsRetryable(fmt.Errorf("outbox write: %w", writeErr))
+				return retry.AsRetryable(fmt.Errorf("outbox write: %w", writeErr))
 			}
 		}
 
 		if commitErr := tx.Commit(); commitErr != nil {
-			return retrier.AsRetryable(fmt.Errorf("commit error handler tx: %w", commitErr))
+			return retry.AsRetryable(fmt.Errorf("commit error handler tx: %w", commitErr))
 		}
 
 		return nil
@@ -293,7 +289,7 @@ func (e *StepExecutor) publishEvent(
 
 	return e.retryInfra(ctx, func(retryCtx context.Context) error {
 		if err := e.writer.WriteTx(retryCtx, msg, topics, stp.Name(), nil); err != nil {
-			return retrier.AsRetryable(fmt.Errorf("publish event [type=%s]: %w", eventType, err))
+			return retry.AsRetryable(fmt.Errorf("publish event [type=%s]: %w", eventType, err))
 		}
 		return nil
 	})
