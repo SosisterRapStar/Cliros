@@ -69,7 +69,7 @@ func main() {
 		},
 
 		PollInterval:  1 * time.Second,
-		BatchSize:     10,                    //nolint:mnd
+		BatchSize:     10, //nolint:mnd
 		BackoffPolicy: backoff.Expontential{},
 		BackoffMin:    100 * time.Millisecond, //nolint:mnd
 		BackoffMax:    1 * time.Minute,
@@ -173,11 +173,3 @@ func main() {
 
 	log.Println("saga started successfully, outbox messages will be published by the Reader")
 }
-
-// Пример вывода:
-//
-// [stub] subscribed to topic: order-service.create
-// order created: order-123 for user user-456, amount 99.99
-// execute action committed, messages written to outbox
-// saga started successfully, outbox messages will be published by the Reader
-// [stub] published to payment-service.process: sagaID=..., from=create-order
