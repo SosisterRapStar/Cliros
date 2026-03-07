@@ -169,7 +169,7 @@ func TestExecuteStep_Success(t *testing.T) {
 		return msg, nil
 	})
 
-	if err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
+	if _, err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if n := atomic.LoadInt32(&calls); n != 1 {
@@ -184,7 +184,7 @@ func TestExecuteStep_ActionFails_NoHandler_PublishesFailure(t *testing.T) {
 		return message.Message{}, fmt.Errorf("business error")
 	})
 
-	if err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
+	if _, err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
 		t.Fatalf("expected success (failure event published), got: %v", err)
 	}
 }
@@ -212,7 +212,7 @@ func TestExecuteStep_RetryableError_RetriesWithNewTx(t *testing.T) {
 		withRetryPolicy(newRetrier(5)),
 	)
 
-	if err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
+	if _, err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
 		t.Fatalf("expected success on 3rd retry, got: %v", err)
 	}
 	if n := atomic.LoadInt32(&actionCalls); n != 3 {
@@ -235,7 +235,7 @@ func TestExecuteStep_NonRetryableError_NoRetry(t *testing.T) {
 		withRetryPolicy(newRetrier(10)),
 	)
 
-	if err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
+	if _, err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
 		t.Fatalf("expected success (failure published), got: %v", err)
 	}
 	if n := atomic.LoadInt32(&actionCalls); n != 1 {
@@ -263,7 +263,7 @@ func TestExecuteStep_InfraError_BeginTx_Retries(t *testing.T) {
 		return msg, nil
 	})
 
-	if err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
+	if _, err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
 		t.Fatalf("expected success after infra retry, got: %v", err)
 	}
 	if n := atomic.LoadInt32(&beginCalls); n < 3 {
@@ -294,7 +294,7 @@ func TestExecuteStep_InfraError_Commit_Retries(t *testing.T) {
 		return msg, nil
 	})
 
-	if err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
+	if _, err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
 		t.Fatalf("expected success after commit retry, got: %v", err)
 	}
 	if n := atomic.LoadInt32(&actionCalls); n != 2 {
@@ -328,7 +328,7 @@ func TestExecuteStep_InfraDoesNotConsumeUserBudget(t *testing.T) {
 		withRetryPolicy(newRetrier(3)),
 	)
 
-	if err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
+	if _, err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
 		t.Fatalf("expected success, got: %v", err)
 	}
 	if n := atomic.LoadInt32(&actionCalls); n != 3 {
@@ -350,7 +350,7 @@ func TestExecuteStep_WithErrorHandler_Succeeds(t *testing.T) {
 		}),
 	)
 
-	if err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
+	if _, err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
 		t.Fatalf("expected success (handler recovered), got: %v", err)
 	}
 	if n := atomic.LoadInt32(&handlerCalls); n != 1 {
@@ -370,7 +370,7 @@ func TestExecuteStep_WithErrorHandler_Fails_PublishesFailure(t *testing.T) {
 		}),
 	)
 
-	if err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
+	if _, err := exec.ExecuteStep(context.Background(), stp, testMsg()); err != nil {
 		t.Fatalf("expected success (failure published), got: %v", err)
 	}
 }
@@ -388,7 +388,7 @@ func TestExecuteStep_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := exec.ExecuteStep(ctx, stp, testMsg())
+	_, err := exec.ExecuteStep(ctx, stp, testMsg())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got: %v", err)
 	}

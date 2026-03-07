@@ -65,37 +65,40 @@ func (e *StepExecutor) retryInfra(ctx context.Context, work func(ctx context.Con
 //  1. Попытка выполнить action (user retry + infra retry), каждая попытка = новая TX.
 //  2. Если action провалился и есть ErrorHandler — вызвать его в свежей TX.
 //  3. Если ErrorHandler нет или тоже упал — опубликовать failure event.
-func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg message.Message) error {
+//
+// При успехе возвращает сообщение, которое записано в outbox (результат шага с SagaID, FromStep, MessageType).
+// Его можно передать в следующий шаг при последовательном запуске.
+func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg message.Message) (message.Message, error) {
 	routing := stp.GetRouting()
 
-	err := e.runWithUserRetry(ctx, stp, msg, stp.GetExecute(),
+	outMsg, err := e.runWithUserRetry(ctx, stp, msg, stp.GetExecute(),
 		message.EventTypeComplete, routing.NextStepTopics, stp.GetRetryPolicy())
 	if err == nil {
 		logger.Info("execute action committed, messages written to outbox")
-		return nil
+		return outMsg, nil
 	}
 
 	errHandler := stp.GetOnError()
 	if errHandler == nil {
-		return e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics)
+		return message.Message{}, e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics)
 	}
 
-	handlerErr := e.runErrorHandler(ctx, stp, msg, err, errHandler,
+	outMsg, handlerErr := e.runErrorHandler(ctx, stp, msg, err, errHandler,
 		message.EventTypeComplete, routing.NextStepTopics)
 	if handlerErr == nil {
 		logger.Info("error handler succeeded, continuing saga")
-		return nil
+		return outMsg, nil
 	}
 
 	logger.Info("error handler failed, sending failure event")
-	return e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics)
+	return message.Message{}, e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics)
 }
 
 // CompensateStep выполняет компенсацию шага с полным циклом надёжности.
 func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg message.Message) error {
 	routing := stp.GetRouting()
 
-	err := e.runWithUserRetry(ctx, stp, msg, stp.GetCompensate(),
+	_, err := e.runWithUserRetry(ctx, stp, msg, stp.GetCompensate(),
 		message.EventTypeFailed, routing.ErrorTopics, stp.GetRetryPolicy())
 	if err == nil {
 		logger.Info("compensation committed, messages written to outbox")
@@ -108,7 +111,7 @@ func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg m
 		return fmt.Errorf("compensation failed: %w", err)
 	}
 
-	handlerErr := e.runErrorHandler(ctx, stp, msg, err, errHandler,
+	_, handlerErr := e.runErrorHandler(ctx, stp, msg, err, errHandler,
 		message.EventTypeFailed, routing.ErrorTopics)
 	if handlerErr == nil {
 		logger.Info("compensation error handler succeeded, continuing compensation")
@@ -132,22 +135,22 @@ func (e *StepExecutor) atomicRun(
 	action step.Action,
 	eventType message.MessageType,
 	topics []string,
-) error {
+) (message.Message, error) {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
-		return retry.AsRetryable(fmt.Errorf("begin tx: %w", err))
+		return message.Message{}, retry.AsRetryable(fmt.Errorf("begin tx: %w", err))
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	if e.inbox != nil && msg.FromStep != "" {
 		if err := e.inbox.Claim(ctx, tx, msg); err != nil {
-			return err
+			return message.Message{}, err
 		}
 	}
 
 	result, err := action(ctx, tx, msg)
 	if err != nil {
-		return &actionError{err: err}
+		return message.Message{}, &actionError{err: err}
 	}
 
 	result.SagaID = msg.SagaID
@@ -157,15 +160,15 @@ func (e *StepExecutor) atomicRun(
 		result.FromStep = stp.Name()
 
 		if err := e.writer.WriteMessages(ctx, result, tx, topics, stp.Name()); err != nil {
-			return retry.AsRetryable(fmt.Errorf("outbox write: %w", err))
+			return message.Message{}, retry.AsRetryable(fmt.Errorf("outbox write: %w", err))
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return retry.AsRetryable(fmt.Errorf("commit tx: %w", err))
+		return message.Message{}, retry.AsRetryable(fmt.Errorf("commit tx: %w", err))
 	}
 
-	return nil
+	return result, nil
 }
 
 // runWithInfraRetry оборачивает atomicRun в infraRetrier (если задан).
@@ -179,18 +182,21 @@ func (e *StepExecutor) runWithInfraRetry(
 	action step.Action,
 	eventType message.MessageType,
 	topics []string,
-) error {
+) (message.Message, error) {
+	var outMsg message.Message
 	err := e.retryInfra(ctx, func(retryCtx context.Context) error {
-		return e.atomicRun(retryCtx, stp, msg, action, eventType, topics)
+		var runErr error
+		outMsg, runErr = e.atomicRun(retryCtx, stp, msg, action, eventType, topics)
+		return runErr
 	})
 	if err != nil {
 		var ae *actionError
 		if errors.As(err, &ae) {
-			return ae.Unwrap()
+			return message.Message{}, ae.Unwrap()
 		}
-		return err
+		return message.Message{}, err
 	}
-	return nil
+	return outMsg, nil
 }
 
 // runWithUserRetry — внешний retry-цикл с пользовательской политикой.
@@ -204,14 +210,21 @@ func (e *StepExecutor) runWithUserRetry(
 	eventType message.MessageType,
 	topics []string,
 	userRetryPolicy *retry.Retrier,
-) error {
+) (message.Message, error) {
 	if userRetryPolicy == nil {
 		return e.runWithInfraRetry(ctx, stp, msg, action, eventType, topics)
 	}
 
-	return userRetryPolicy.Retry(ctx, func(retryCtx context.Context) error {
-		return e.runWithInfraRetry(retryCtx, stp, msg, action, eventType, topics)
+	var outMsg message.Message
+	err := userRetryPolicy.Retry(ctx, func(retryCtx context.Context) error {
+		var runErr error
+		outMsg, runErr = e.runWithInfraRetry(retryCtx, stp, msg, action, eventType, topics)
+		return runErr
 	})
+	if err != nil {
+		return message.Message{}, err
+	}
+	return outMsg, nil
 }
 
 // runErrorHandler вызывает ErrorHandler в свежей TX с infra retry.
@@ -225,7 +238,8 @@ func (e *StepExecutor) runErrorHandler(
 	handler step.ErrorHandler,
 	eventType message.MessageType,
 	topics []string,
-) error {
+) (message.Message, error) {
+	var outMsg message.Message
 	err := e.retryInfra(ctx, func(retryCtx context.Context) error {
 		tx, txErr := e.db.BeginTx(retryCtx, nil)
 		if txErr != nil {
@@ -259,16 +273,17 @@ func (e *StepExecutor) runErrorHandler(
 			return retry.AsRetryable(fmt.Errorf("commit error handler tx: %w", commitErr))
 		}
 
+		outMsg = result
 		return nil
 	})
 	if err != nil {
 		var ae *actionError
 		if errors.As(err, &ae) {
-			return ae.Unwrap()
+			return message.Message{}, ae.Unwrap()
 		}
-		return err
+		return message.Message{}, err
 	}
-	return nil
+	return outMsg, nil
 }
 
 // publishEvent записывает событие в outbox через отдельную транзакцию с infra retry.

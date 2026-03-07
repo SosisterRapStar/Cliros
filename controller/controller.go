@@ -226,7 +226,7 @@ func (c *Controller) Register(topic string, stp *step.Step) error {
 		var actionErr error
 		switch msgType {
 		case message.EventTypeComplete:
-			actionErr = c.executor.ExecuteStep(ctx, stp, msg)
+			_, actionErr = c.executor.ExecuteStep(ctx, stp, msg)
 		case message.EventTypeFailed:
 			actionErr = c.executor.CompensateStep(ctx, stp, msg)
 		default:
@@ -243,15 +243,34 @@ func (c *Controller) Register(topic string, stp *step.Step) error {
 	})
 }
 
-// StartSaga инициирует новую сагу: генерирует sagaID и запускает первый шаг.
+// StartSaga инициирует новую сагу: генерирует sagaID и запускает один шаг.
+// Для последовательного запуска нескольких шагов используйте StartSagaWithSteps.
 func (c *Controller) StartSaga(ctx context.Context, stp *step.Step, msg message.Message) error {
+	_, err := c.StartSagaWithSteps(ctx, []*step.Step{stp}, msg)
+	return err
+}
+
+// StartSagaWithSteps инициирует новую сагу и выполняет переданные шаги по очереди:
+// результат каждого шага передаётся как вход следующему (в одном процессе, без брокера).
+// Если какой-либо шаг вернёт ошибку, сага прерывается.
+func (c *Controller) StartSagaWithSteps(ctx context.Context, steps []*step.Step, msg message.Message) (message.Message, error) {
+	if len(steps) == 0 {
+		return message.Message{}, fmt.Errorf("at least one step is required")
+	}
+
 	sagaID, err := generateSagaID()
 	if err != nil {
-		return err
+		return message.Message{}, err
 	}
 
 	msg.SagaID = sagaID
-	return c.executor.ExecuteStep(ctx, stp, msg)
+	for _, stp := range steps {
+		msg, err = c.executor.ExecuteStep(ctx, stp, msg)
+		if err != nil {
+			return message.Message{}, err
+		}
+	}
+	return msg, nil
 }
 
 func generateSagaID() (string, error) {
