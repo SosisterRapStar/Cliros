@@ -375,6 +375,72 @@ func TestExecuteStep_WithErrorHandler_Fails_PublishesFailure(t *testing.T) {
 	}
 }
 
+// TestExecuteStep_OnErrorFails_WithEmptyMessage_PublishesToErrorTopic проверяет, что при возврате
+// пустого сообщения из OnError в ErrorTopics уходит исходное msg и ExecuteStep возвращает nil.
+func TestExecuteStep_OnErrorFails_WithEmptyMessage_PublishesToErrorTopic(t *testing.T) {
+	exec := newTestExecutor(okDB(), 3)
+
+	stp := testStep(
+		func(_ context.Context, _ database.TxQueryer, _ message.Message) (message.Message, error) {
+			return message.Message{}, fmt.Errorf("action failed")
+		},
+		withOnError(func(_ context.Context, _ database.TxQueryer, _ message.Message, _ error) (message.Message, error) {
+			return message.Message{}, fmt.Errorf("handler failed") // пустое сообщение → в топик уйдёт исходное msg
+		}),
+	)
+
+	_, err := exec.ExecuteStep(context.Background(), stp, testMsg())
+	if err != nil {
+		t.Fatalf("expected nil (failure event в ErrorTopics с исходным msg), got: %v", err)
+	}
+}
+
+// TestExecuteStep_OnErrorFails_WithCustomMessage_PublishesCustomToErrorTopic проверяет, что при возврате
+// кастомного сообщения из OnError в ErrorTopics уходит именно оно и ExecuteStep возвращает nil.
+func TestExecuteStep_OnErrorFails_WithCustomMessage_PublishesCustomToErrorTopic(t *testing.T) {
+	exec := newTestExecutor(okDB(), 3)
+
+	customPayload := map[string]any{"custom_error": true, "reason": "handler_recovery_failed"}
+	stp := testStep(
+		func(_ context.Context, _ database.TxQueryer, _ message.Message) (message.Message, error) {
+			return message.Message{}, fmt.Errorf("action failed")
+		},
+		withOnError(func(_ context.Context, _ database.TxQueryer, _ message.Message, _ error) (message.Message, error) {
+			return message.Message{
+				MessagePayload: message.MessagePayload{Payload: customPayload},
+			}, fmt.Errorf("handler failed")
+		}),
+	)
+
+	_, err := exec.ExecuteStep(context.Background(), stp, testMsg())
+	if err != nil {
+		t.Fatalf("expected nil (failure event в ErrorTopics с кастомным msg), got: %v", err)
+	}
+}
+
+// TestExecuteStep_OnErrorFails_WithCustomMessage_NoSagaID_FillsSagaID проверяет, что при кастомном
+// сообщении без SagaID executor подставляет SagaID перед отправкой в error-топик.
+func TestExecuteStep_OnErrorFails_WithCustomMessage_NoSagaID_FillsSagaID(t *testing.T) {
+	exec := newTestExecutor(okDB(), 3)
+
+	stp := testStep(
+		func(_ context.Context, _ database.TxQueryer, _ message.Message) (message.Message, error) {
+			return message.Message{}, fmt.Errorf("action failed")
+		},
+		withOnError(func(_ context.Context, _ database.TxQueryer, msg message.Message, _ error) (message.Message, error) {
+			return message.Message{
+				MessagePayload: message.MessagePayload{Payload: map[string]any{"only_payload": true}},
+			}, fmt.Errorf("handler failed")
+		}),
+	)
+
+	// Не паникуем (SagaID подставится), ExecuteStep возвращает nil
+	_, err := exec.ExecuteStep(context.Background(), stp, testMsg())
+	if err != nil {
+		t.Fatalf("expected nil error (custom message with filled SagaID published), got: %v", err)
+	}
+}
+
 func TestExecuteStep_ContextCancelled(t *testing.T) {
 	exec := newTestExecutor(okDB(), 3)
 

@@ -83,6 +83,7 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 		return message.Message{}, e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics)
 	}
 
+	// Сообщение из OnError уходит в NextStepTopics с типом Complete — сага продолжается.
 	outMsg, handlerErr := e.runErrorHandler(ctx, stp, msg, err, errHandler,
 		message.EventTypeComplete, routing.NextStepTopics)
 	if handlerErr == nil {
@@ -90,8 +91,17 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 		return outMsg, nil
 	}
 
+	// OnError не смог обработать ошибку: в ErrorTopics уходит сообщение. Если handler вернул непустое
+	// сообщение (outMsg) — отправляем его, иначе исходное msg.
+	msgForError := msg
+	if outMsg.SagaID != "" || len(outMsg.Payload) > 0 {
+		msgForError = outMsg
+		if msgForError.SagaID == "" {
+			msgForError.SagaID = msg.SagaID
+		}
+	}
 	logger.Info("error handler failed, sending failure event")
-	return message.Message{}, e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics)
+	return message.Message{}, e.publishEvent(ctx, stp, msgForError, message.EventTypeFailed, routing.ErrorTopics)
 }
 
 // CompensateStep выполняет компенсацию шага с полным циклом надёжности.
@@ -111,6 +121,7 @@ func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg m
 		return fmt.Errorf("compensation failed: %w", err)
 	}
 
+	// Сообщение из OnCompensateError уходит в ErrorTopics с типом Failed — цепочка компенсации продолжается.
 	_, handlerErr := e.runErrorHandler(ctx, stp, msg, err, errHandler,
 		message.EventTypeFailed, routing.ErrorTopics)
 	if handlerErr == nil {
@@ -228,8 +239,10 @@ func (e *StepExecutor) runWithUserRetry(
 }
 
 // runErrorHandler вызывает ErrorHandler в свежей TX с infra retry.
-// Если handler успешен — результат + outbox записываются в ту же TX и коммитятся.
-// Если handler упал (actionError) — infra retry останавливается, ошибка возвращается.
+// Если handler успешен — возвращённое сообщение (с подставленными SagaID, FromStep, MessageType=eventType)
+// записывается в outbox в топики topics и коммитится.
+// Если handler упал — возвращается (result, err); result — сообщение, которое вернул handler (можно использовать
+// для отправки в error-топик: при непустом result вызывающий код отправит его вместо исходного msg).
 func (e *StepExecutor) runErrorHandler(
 	ctx context.Context,
 	stp *step.Step,
@@ -240,6 +253,7 @@ func (e *StepExecutor) runErrorHandler(
 	topics []string,
 ) (message.Message, error) {
 	var outMsg message.Message
+	var handlerResultOnErr message.Message
 	err := e.retryInfra(ctx, func(retryCtx context.Context) error {
 		tx, txErr := e.db.BeginTx(retryCtx, nil)
 		if txErr != nil {
@@ -255,6 +269,7 @@ func (e *StepExecutor) runErrorHandler(
 
 		result, handlerErr := handler(retryCtx, tx, msg, originalErr)
 		if handlerErr != nil {
+			handlerResultOnErr = result
 			return &actionError{err: handlerErr}
 		}
 
@@ -279,7 +294,7 @@ func (e *StepExecutor) runErrorHandler(
 	if err != nil {
 		var ae *actionError
 		if errors.As(err, &ae) {
-			return message.Message{}, ae.Unwrap()
+			return handlerResultOnErr, ae.Unwrap()
 		}
 		return message.Message{}, err
 	}

@@ -17,9 +17,15 @@ import (
 // Не-retryable ошибки прекращают повторы и передаются в ErrorHandler.
 type Action func(ctx context.Context, tx database.TxQueryer, msg message.Message) (message.Message, error)
 
-// ErrorHandler -- обработчик ошибок, вызывается executor'ом при падении Execute или Compensate
+// ErrorHandler — обработчик ошибок, вызывается executor'ом при падении Execute или Compensate
 // после того, как все повторные попытки (если были) исчерпаны.
 // tx создаётся executor'ом — каждый вызов получает свежую транзакцию.
+//
+// Возвращённое сообщение (можно пересобрать payload) записывается в outbox и уходит в топики:
+//   - OnError при успехе: результат пишется в NextStepTopics с типом "execute" — сага продолжается.
+//   - OnError при ошибке: возвращённое сообщение (если не пустое) уходит в ErrorTopics с типом "failed";
+//     иначе в ErrorTopics уходит исходное msg.
+//   - OnCompensateError: результат пишется в ErrorTopics с типом "failed" — цепочка компенсации продолжается.
 type ErrorHandler func(ctx context.Context, tx database.TxQueryer, msg message.Message, err error) (message.Message, error)
 
 type StepParams struct {
