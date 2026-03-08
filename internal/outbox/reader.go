@@ -282,8 +282,14 @@ func fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, error) {
 		meta    message.MessageMeta
 		payload message.MessagePayload
 	)
+	if len(oMsg.Metadata) > 0 {
+		if err := json.Unmarshal(oMsg.Metadata, &meta); err != nil {
+			return message.Message{}, fmt.Errorf("unmarshal outbox metadata: %w", err)
+		}
+	}
 	meta.FromStep = oMsg.StepName
 	meta.SagaID = oMsg.SagaID.String()
+
 	if err := json.Unmarshal(oMsg.Payload, &payload); err != nil {
 		return message.Message{}, err
 	}

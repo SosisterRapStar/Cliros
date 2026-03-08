@@ -9,9 +9,9 @@ import (
 	"github.com/bytedance/gopkg/util/logger"
 
 	"github.com/SosisterRapStar/LETI-paper/database"
+	"github.com/SosisterRapStar/LETI-paper/internal/inbox"
 	"github.com/SosisterRapStar/LETI-paper/internal/observability/metrics"
 	"github.com/SosisterRapStar/LETI-paper/internal/observability/tracing"
-	"github.com/SosisterRapStar/LETI-paper/internal/inbox"
 	"github.com/SosisterRapStar/LETI-paper/internal/outbox"
 	"github.com/SosisterRapStar/LETI-paper/message"
 	"github.com/SosisterRapStar/LETI-paper/retry"
@@ -28,16 +28,16 @@ import (
 //     Если не задан — инфраструктурные операции выполняются без retry.
 //   - per-step RetryPolicy — для пользовательских ошибок (action вернул RetryableError).
 //
-// Инфраструктурные ошибки не расходуют бюджет пользовательского retry и наоборот.
+// Инфраструктурные ошибки не расходуют бюджет пользовательского retry.
 type StepExecutor struct {
-	db              database.DB
-	writer          *outbox.Writer
-	inbox           *inbox.Inbox
-	infraRetrier    *retry.Retrier
-	metrics         *metrics.Metrics
-	tracingEnabled  bool
-	tracerName      string
-	tracer          trace.Tracer
+	db             database.DB
+	writer         *outbox.Writer
+	inbox          *inbox.Inbox
+	infraRetrier   *retry.Retrier
+	metrics        *metrics.Metrics
+	tracingEnabled bool
+	tracerName     string
+	tracer         trace.Tracer
 }
 
 // New создаёт новый StepExecutor.
@@ -45,7 +45,7 @@ type StepExecutor struct {
 //   - w — writer для записи в outbox.
 //   - inbox — для дедупликации входящих сообщений (inbox-паттерн); может быть nil — тогда claim не выполняется.
 //   - infraRetrier — политика retry для инфраструктурных ошибок (BeginTx, Commit, WriteOutbox).
-//     Может быть nil — в этом случае инфраструктурные ошибки не  выполняются без retry.
+//     Может быть nil — в этом случае ошибки самой библиотеки не ретраятся
 //   - metrics — опциональные метрики саг (Prometheus); если nil — метрики не собираются.
 //   - tracingEnabled — включать спэны шагов и inject/extract trace-контекста в сообщения (передаётся из controller.Config.Tracing != nil).
 //   - tracerName — имя трассера, когда tracer == nil (из Config.Tracing.TracerName); при выключенном трейсинге может быть пустым.

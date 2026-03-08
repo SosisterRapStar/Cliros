@@ -7,8 +7,6 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-// InjectTraceContext записывает текущий trace-контекст из ctx в msg (Traceparent, Tracestate).
-// Вызывать перед записью сообщения в outbox, чтобы следующий consumer мог продолжить тот же трейс.
 func InjectTraceContext(ctx context.Context, msg *message.Message) {
 	if msg == nil {
 		return
@@ -17,9 +15,6 @@ func InjectTraceContext(ctx context.Context, msg *message.Message) {
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
 }
 
-// ExtractTraceContext извлекает trace-контекст из msg в ctx и возвращает новый context.
-// Вызывать в начале обработки входящего сообщения (например в Register), чтобы ExecuteStep/CompensateStep
-// создавали спэны как дочерние к трейсу отправителя.
 func ExtractTraceContext(ctx context.Context, msg *message.Message) context.Context {
 	if msg == nil {
 		return ctx

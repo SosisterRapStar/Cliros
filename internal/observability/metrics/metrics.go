@@ -15,10 +15,6 @@ const (
 )
 
 // Metrics собирает базовые метрики по сагам и шагам для экспорта в Prometheus.
-// Опционально: если пользователь не передаёт *Metrics в Config (nil), метрики не собираются.
-//
-// Завершение саги (completed) в библиотеке не отслеживается: в async-сценарии сага идёт по шагам
-// через брокер, и единого момента «сага завершена» нет. Поэтому метрика «saga completed» не выставляется.
 type Metrics struct {
 	StepsTotal   *prometheus.CounterVec
 	StepDuration *prometheus.HistogramVec
