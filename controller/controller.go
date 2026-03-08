@@ -13,6 +13,7 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/broker"
 	"github.com/SosisterRapStar/LETI-paper/database"
 	"github.com/SosisterRapStar/LETI-paper/internal/executor"
+	"github.com/SosisterRapStar/LETI-paper/internal/observability/metrics"
 	"github.com/SosisterRapStar/LETI-paper/internal/inbox"
 	"github.com/SosisterRapStar/LETI-paper/internal/outbox"
 	"github.com/SosisterRapStar/LETI-paper/message"
@@ -53,6 +54,10 @@ type Config struct {
 
 	// ErrCh — канал для ошибок Reader'а (неблокирующая отправка). Если nil — ошибки теряются.
 	ErrCh chan<- error
+
+	// Metrics — опциональные метрики саг (Prometheus). Если nil — метрики не собираются.
+	// Создаётся через metrics.New(registry, "saga") с собственным prometheus.Registry.
+	Metrics *metrics.Metrics
 }
 
 type Saga interface {
@@ -71,6 +76,7 @@ type Controller struct {
 	executor *executor.StepExecutor
 	reader   *outbox.Reader
 	dbCtx    *database.DBContext
+	metrics  *metrics.Metrics
 }
 
 func New(cfg *Config) (*Controller, error) {
@@ -126,7 +132,7 @@ func New(cfg *Config) (*Controller, error) {
 
 	inboxSvc := inbox.New(cfg.DB)
 
-	exec, err := executor.New(cfg.DB.DB(), w, inboxSvc, cfg.InfraRetry)
+	exec, err := executor.New(cfg.DB.DB(), w, inboxSvc, cfg.InfraRetry, cfg.Metrics)
 	if err != nil {
 		return nil, fmt.Errorf("creating executor: %w", err)
 	}
@@ -136,6 +142,7 @@ func New(cfg *Config) (*Controller, error) {
 		executor: exec,
 		reader:   r,
 		dbCtx:    cfg.DB,
+		metrics:  cfg.Metrics,
 	}, nil
 }
 
@@ -264,6 +271,8 @@ func (c *Controller) StartSagaWithSteps(ctx context.Context, steps []*step.Step,
 	}
 
 	msg.SagaID = sagaID
+	c.metrics.SagaStartedInc()
+
 	for _, stp := range steps {
 		msg, err = c.executor.ExecuteStep(ctx, stp, msg)
 		if err != nil {

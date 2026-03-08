@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bytedance/gopkg/util/logger"
 
 	"github.com/SosisterRapStar/LETI-paper/database"
+	"github.com/SosisterRapStar/LETI-paper/internal/observability/metrics"
 	"github.com/SosisterRapStar/LETI-paper/internal/inbox"
 	"github.com/SosisterRapStar/LETI-paper/internal/outbox"
 	"github.com/SosisterRapStar/LETI-paper/message"
@@ -29,6 +31,7 @@ type StepExecutor struct {
 	writer       *outbox.Writer
 	inbox        *inbox.Inbox
 	infraRetrier *retry.Retrier
+	metrics      *metrics.Metrics
 }
 
 // New создаёт новый StepExecutor.
@@ -37,7 +40,8 @@ type StepExecutor struct {
 //   - inbox — для дедупликации входящих сообщений (inbox-паттерн); может быть nil — тогда claim не выполняется.
 //   - infraRetrier — политика retry для инфраструктурных ошибок (BeginTx, Commit, WriteOutbox).
 //     Может быть nil — в этом случае инфраструктурные операции выполняются без retry.
-func New(db database.DB, w *outbox.Writer, inbox *inbox.Inbox, infraRetrier *retry.Retrier) (*StepExecutor, error) {
+//   - metrics — опциональные метрики саг (Prometheus); если nil — метрики не собираются.
+func New(db database.DB, w *outbox.Writer, inbox *inbox.Inbox, infraRetrier *retry.Retrier, metrics *metrics.Metrics) (*StepExecutor, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db is required")
 	}
@@ -49,6 +53,7 @@ func New(db database.DB, w *outbox.Writer, inbox *inbox.Inbox, infraRetrier *ret
 		writer:       w,
 		inbox:        inbox,
 		infraRetrier: infraRetrier,
+		metrics:      metrics,
 	}, nil
 }
 
@@ -68,10 +73,17 @@ func (e *StepExecutor) retryInfra(ctx context.Context, work func(ctx context.Con
 //
 // При успехе возвращает сообщение, которое записано в outbox (результат шага с SagaID, FromStep, MessageType).
 // Его можно передать в следующий шаг при последовательном запуске.
-func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg message.Message) (message.Message, error) {
+func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg message.Message) (outMsg message.Message, err error) {
+	if e.metrics != nil {
+		start := time.Now()
+		defer func() {
+			e.metrics.ObserveStep(stp.Name(), "execute", time.Since(start), err)
+		}()
+	}
+
 	routing := stp.GetRouting()
 
-	outMsg, err := e.runWithUserRetry(ctx, stp, msg, stp.GetExecute(),
+	outMsg, err = e.runWithUserRetry(ctx, stp, msg, stp.GetExecute(),
 		message.EventTypeComplete, routing.NextStepTopics, stp.GetRetryPolicy())
 	if err == nil {
 		logger.Info("execute action committed, messages written to outbox")
@@ -105,10 +117,17 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 }
 
 // CompensateStep выполняет компенсацию шага с полным циклом надёжности.
-func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg message.Message) error {
+func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg message.Message) (err error) {
+	if e.metrics != nil {
+		start := time.Now()
+		defer func() {
+			e.metrics.ObserveStep(stp.Name(), "compensate", time.Since(start), err)
+		}()
+	}
+
 	routing := stp.GetRouting()
 
-	_, err := e.runWithUserRetry(ctx, stp, msg, stp.GetCompensate(),
+	_, err = e.runWithUserRetry(ctx, stp, msg, stp.GetCompensate(),
 		message.EventTypeFailed, routing.ErrorTopics, stp.GetRetryPolicy())
 	if err == nil {
 		logger.Info("compensation committed, messages written to outbox")

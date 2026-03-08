@@ -1,7 +1,3 @@
-// Package main демонстрирует как пользователь определяет шаг саги
-// с атомарной записью бизнес-логики и outbox-сообщений в одной транзакции.
-//
-// Это пример, а не реальный сервис.
 package main
 
 import (
@@ -11,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // pgx driver for database/sql
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/SosisterRapStar/LETI-paper/backoff"
 	"github.com/SosisterRapStar/LETI-paper/controller"
@@ -20,8 +16,6 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/retry"
 	"github.com/SosisterRapStar/LETI-paper/step"
 )
-
-// --- Заглушка для брокера (в реальности — NATS, Kafka, RabbitMQ) ---
 
 type stubPubsub struct{}
 
