@@ -21,6 +21,7 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/retry"
 	"github.com/SosisterRapStar/LETI-paper/step"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -30,6 +31,10 @@ const (
 	defaultBackoffMin   = 100 * time.Millisecond
 	defaultBackoffMax   = 1 * time.Minute
 )
+
+func NewMetrics(registry *prometheus.Registry, subsystem string) (*metrics.Metrics, error) {
+	return metrics.New(registry, subsystem)
+}
 
 // Config содержит параметры для создания Controller.
 // Subscriber и Publisher обязательны — без них невозможна работа с брокером.
@@ -58,8 +63,8 @@ type Config struct {
 	// ErrCh — канал для ошибок Reader'а (неблокирующая отправка). Если nil — ошибки теряются.
 	ErrCh chan<- error
 
-	// Metrics — опциональные метрики саг в формате Prometheus. Если nil — метрики не собираются.
-	// Создаётся через metrics.New(registry, "saga") prometheus.Registry.
+	// Metrics — опциональные метрики саг (Prometheus). Если nil — метрики не собираются.
+	// Создаётся через NewMetrics(registry, "saga").
 	Metrics *metrics.Metrics
 
 	// Tracing — опциональный трейсинг (спэны шагов, передача trace-контекста в сообщениях).
