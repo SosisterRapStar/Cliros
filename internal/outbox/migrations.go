@@ -24,9 +24,6 @@ var (
 	CREATE INDEX IF NOT EXISTS idx_saga_outbox_scheduled_at ON saga.outbox (scheduled_at);
 	`
 	MySQLOutboxMigration = `
-	CREATE DATABASE IF NOT EXISTS saga;
-	USE saga;
-
 	CREATE TABLE IF NOT EXISTS outbox (
 		saga_id             CHAR(36) NOT NULL,
 		step_name           VARCHAR(255) NOT NULL,
@@ -58,9 +55,6 @@ var (
 	);
 	`
 	MySQLInboxMigration = `
-	CREATE DATABASE IF NOT EXISTS saga;
-	USE saga;
-
 	CREATE TABLE IF NOT EXISTS inbox (
 		saga_id   CHAR(36) NOT NULL,
 		from_step VARCHAR(255) NOT NULL,
