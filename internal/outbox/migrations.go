@@ -35,13 +35,11 @@ var (
 		attempts_counter    INT DEFAULT 0,
 		last_attempt        DATETIME,
 		processed_at        DATETIME,
-		
-		PRIMARY KEY (saga_id, step_name)
+		PRIMARY KEY (saga_id, step_name),
+		INDEX idx_outbox_topic (topic),
+		INDEX idx_outbox_created_at (created_at),
+		INDEX idx_outbox_scheduled_at (scheduled_at)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-	CREATE INDEX idx_outbox_topic ON outbox (topic);
-	CREATE INDEX idx_outbox_created_at ON outbox (created_at);
-	CREATE INDEX idx_outbox_scheduled_at ON outbox (scheduled_at);
 	`
 
 	PostgresInboxMigration = `
