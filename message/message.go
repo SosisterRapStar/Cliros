@@ -10,6 +10,9 @@ type (
 		MessageType MessageType `json:"type"`
 		FromStep    string      `json:"from"`
 		SagaID      string      `json:"saga_id"`
+		// Traceparent и Tracestate — W3C Trace Context
+		Traceparent string `json:"traceparent,omitempty"`
+		Tracestate  string `json:"tracestate,omitempty"`
 	}
 
 	MessagePayload struct {

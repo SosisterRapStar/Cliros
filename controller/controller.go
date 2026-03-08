@@ -13,12 +13,15 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/broker"
 	"github.com/SosisterRapStar/LETI-paper/database"
 	"github.com/SosisterRapStar/LETI-paper/internal/executor"
-	"github.com/SosisterRapStar/LETI-paper/internal/observability/metrics"
 	"github.com/SosisterRapStar/LETI-paper/internal/inbox"
+	"github.com/SosisterRapStar/LETI-paper/internal/observability/metrics"
+	"github.com/SosisterRapStar/LETI-paper/internal/observability/tracing"
 	"github.com/SosisterRapStar/LETI-paper/internal/outbox"
 	"github.com/SosisterRapStar/LETI-paper/message"
 	"github.com/SosisterRapStar/LETI-paper/retry"
 	"github.com/SosisterRapStar/LETI-paper/step"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -55,9 +58,25 @@ type Config struct {
 	// ErrCh — канал для ошибок Reader'а (неблокирующая отправка). Если nil — ошибки теряются.
 	ErrCh chan<- error
 
-	// Metrics — опциональные метрики саг (Prometheus). Если nil — метрики не собираются.
-	// Создаётся через metrics.New(registry, "saga") с собственным prometheus.Registry.
+	// Metrics — опциональные метрики саг в формате Prometheus. Если nil — метрики не собираются.
+	// Создаётся через metrics.New(registry, "saga") prometheus.Registry.
 	Metrics *metrics.Metrics
+
+	// Tracing — опциональный трейсинг (спэны шагов, передача trace-контекста в сообщениях).
+	// Если nil — спэны не создаются, inject/extract не вызываются.
+	Tracing *TracingConfig
+}
+
+// TracingConfig задаёт параметры трейсинга. Передайте в Config.Tracing, чтобы включить трейсинг.
+type TracingConfig struct {
+	// Tracer — свой экземпляр trace.Tracer (например от своего TracerProvider с нужным sampler/экспортером).
+	// Если задан — для спэнов используется он; иначе используется глобальный otel.Tracer(TracerName).
+	// Получить: otel.Tracer("name") из глобального провайдера или myTracerProvider.Tracer("name").
+	Tracer trace.Tracer
+
+	// TracerName — имя для otel.Tracer(name), когда Tracer не задан; отображается в бэкенде как instrumentation scope.
+	// Если пусто — используется "saga". Имеет смысл задать имя сервиса, например "order-service" или "myapp/saga".
+	TracerName string
 }
 
 type Saga interface {
@@ -72,11 +91,14 @@ type Saga interface {
 // Init запускает фоновые процессы (reader) и выполняет миграции.
 // Close останавливает reader.
 type Controller struct {
-	pubsub   broker.Subsciber
-	executor *executor.StepExecutor
-	reader   *outbox.Reader
-	dbCtx    *database.DBContext
-	metrics  *metrics.Metrics
+	pubsub         broker.Subsciber
+	executor       *executor.StepExecutor
+	reader         *outbox.Reader
+	dbCtx          *database.DBContext
+	metrics        *metrics.Metrics
+	tracingEnabled bool
+	tracer         trace.Tracer
+	tracerName     string
 }
 
 func New(cfg *Config) (*Controller, error) {
@@ -132,23 +154,36 @@ func New(cfg *Config) (*Controller, error) {
 
 	inboxSvc := inbox.New(cfg.DB)
 
-	exec, err := executor.New(cfg.DB.DB(), w, inboxSvc, cfg.InfraRetry, cfg.Metrics)
+	tracingEnabled := cfg.Tracing != nil
+	var tracer trace.Tracer
+	tracerName := "saga"
+	if cfg.Tracing != nil {
+		tracer = cfg.Tracing.Tracer
+		if cfg.Tracing.TracerName != "" {
+			tracerName = cfg.Tracing.TracerName
+		}
+	}
+
+	exec, err := executor.New(cfg.DB.DB(), w, inboxSvc, cfg.InfraRetry, cfg.Metrics, tracingEnabled, tracerName, tracer)
 	if err != nil {
 		return nil, fmt.Errorf("creating executor: %w", err)
 	}
 
 	return &Controller{
-		pubsub:   cfg.Subscriber,
-		executor: exec,
-		reader:   r,
-		dbCtx:    cfg.DB,
-		metrics:  cfg.Metrics,
+		pubsub:         cfg.Subscriber,
+		executor:       exec,
+		reader:         r,
+		dbCtx:          cfg.DB,
+		metrics:        cfg.Metrics,
+		tracingEnabled: tracingEnabled,
+		tracer:         tracer,
+		tracerName:     tracerName,
 	}, nil
 }
 
 // Init выполняет начальную инициализацию:
 //  1. Применяет миграции outbox-таблицы (CREATE IF NOT EXISTS — идемпотентно).
-//  2. Запускает фоновый процесс reader (polling outbox → publish в брокер).
+//  2. Запускает фоновый процесс reader (polling outbox -> publish в брокер).
 //
 // Вызывать после Register, перед StartSaga.
 func (c *Controller) Init(ctx context.Context) error {
@@ -223,6 +258,9 @@ func (c *Controller) migrationInboxSQL() (string, error) {
 // Register подписывается на топик и направляет входящие сообщения в соответствующий шаг.
 func (c *Controller) Register(topic string, stp *step.Step) error {
 	return c.pubsub.Subscribe(context.Background(), topic, func(ctx context.Context, msg message.Message) error {
+		if c.tracingEnabled {
+			ctx = tracing.ExtractTraceContext(ctx, &msg)
+		}
 		logger.Infof("received message from step=%s, saga=%s", msg.FromStep, msg.GetSagaID())
 
 		msgType, err := msg.GetType()
@@ -272,6 +310,12 @@ func (c *Controller) StartSagaWithSteps(ctx context.Context, steps []*step.Step,
 
 	msg.SagaID = sagaID
 	c.metrics.SagaStartedInc()
+
+	if c.tracingEnabled {
+		var sagaSpan trace.Span
+		ctx, sagaSpan = tracing.StartSagaSpan(ctx, c.tracer, c.tracerName, sagaID)
+		defer sagaSpan.End()
+	}
 
 	for _, stp := range steps {
 		msg, err = c.executor.ExecuteStep(ctx, stp, msg)

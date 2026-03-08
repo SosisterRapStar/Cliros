@@ -10,11 +10,14 @@ import (
 
 	"github.com/SosisterRapStar/LETI-paper/database"
 	"github.com/SosisterRapStar/LETI-paper/internal/observability/metrics"
+	"github.com/SosisterRapStar/LETI-paper/internal/observability/tracing"
 	"github.com/SosisterRapStar/LETI-paper/internal/inbox"
 	"github.com/SosisterRapStar/LETI-paper/internal/outbox"
 	"github.com/SosisterRapStar/LETI-paper/message"
 	"github.com/SosisterRapStar/LETI-paper/retry"
 	"github.com/SosisterRapStar/LETI-paper/step"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // StepExecutor — атомарная единица "действие + транзакция + outbox".
@@ -27,11 +30,14 @@ import (
 //
 // Инфраструктурные ошибки не расходуют бюджет пользовательского retry и наоборот.
 type StepExecutor struct {
-	db           database.DB
-	writer       *outbox.Writer
-	inbox        *inbox.Inbox
-	infraRetrier *retry.Retrier
-	metrics      *metrics.Metrics
+	db              database.DB
+	writer          *outbox.Writer
+	inbox           *inbox.Inbox
+	infraRetrier    *retry.Retrier
+	metrics         *metrics.Metrics
+	tracingEnabled  bool
+	tracerName      string
+	tracer          trace.Tracer
 }
 
 // New создаёт новый StepExecutor.
@@ -39,9 +45,12 @@ type StepExecutor struct {
 //   - w — writer для записи в outbox.
 //   - inbox — для дедупликации входящих сообщений (inbox-паттерн); может быть nil — тогда claim не выполняется.
 //   - infraRetrier — политика retry для инфраструктурных ошибок (BeginTx, Commit, WriteOutbox).
-//     Может быть nil — в этом случае инфраструктурные операции выполняются без retry.
+//     Может быть nil — в этом случае инфраструктурные ошибки не  выполняются без retry.
 //   - metrics — опциональные метрики саг (Prometheus); если nil — метрики не собираются.
-func New(db database.DB, w *outbox.Writer, inbox *inbox.Inbox, infraRetrier *retry.Retrier, metrics *metrics.Metrics) (*StepExecutor, error) {
+//   - tracingEnabled — включать спэны шагов и inject/extract trace-контекста в сообщения (передаётся из controller.Config.Tracing != nil).
+//   - tracerName — имя трассера, когда tracer == nil (из Config.Tracing.TracerName); при выключенном трейсинге может быть пустым.
+//   - tracer — свой trace.Tracer (из Config.Tracing.Tracer); если nil, используется глобальный otel.Tracer(tracerName).
+func New(db database.DB, w *outbox.Writer, inbox *inbox.Inbox, infraRetrier *retry.Retrier, metrics *metrics.Metrics, tracingEnabled bool, tracerName string, tr trace.Tracer) (*StepExecutor, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db is required")
 	}
@@ -49,11 +58,14 @@ func New(db database.DB, w *outbox.Writer, inbox *inbox.Inbox, infraRetrier *ret
 		return nil, fmt.Errorf("writer is required")
 	}
 	return &StepExecutor{
-		db:           db,
-		writer:       w,
-		inbox:        inbox,
-		infraRetrier: infraRetrier,
-		metrics:      metrics,
+		db:             db,
+		writer:         w,
+		inbox:          inbox,
+		infraRetrier:   infraRetrier,
+		metrics:        metrics,
+		tracingEnabled: tracingEnabled,
+		tracerName:     tracerName,
+		tracer:         tr,
 	}, nil
 }
 
@@ -74,6 +86,15 @@ func (e *StepExecutor) retryInfra(ctx context.Context, work func(ctx context.Con
 // При успехе возвращает сообщение, которое записано в outbox (результат шага с SagaID, FromStep, MessageType).
 // Его можно передать в следующий шаг при последовательном запуске.
 func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg message.Message) (outMsg message.Message, err error) {
+	var span trace.Span
+	if e.tracingEnabled {
+		ctx, span = tracing.StartStepSpan(ctx, e.tracer, e.tracerName, msg.SagaID, stp.Name(), "execute")
+	} else {
+		span = trace.SpanFromContext(ctx)
+	}
+	defer func() {
+		tracing.EndStepSpan(span, err)
+	}()
 	if e.metrics != nil {
 		start := time.Now()
 		defer func() {
@@ -116,8 +137,17 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 	return message.Message{}, e.publishEvent(ctx, stp, msgForError, message.EventTypeFailed, routing.ErrorTopics)
 }
 
-// CompensateStep выполняет компенсацию шага с полным циклом надёжности.
+// CompensateStep выполняет компенсацию шага
 func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg message.Message) (err error) {
+	var span trace.Span
+	if e.tracingEnabled {
+		ctx, span = tracing.StartStepSpan(ctx, e.tracer, e.tracerName, msg.SagaID, stp.Name(), "compensate")
+	} else {
+		span = trace.SpanFromContext(ctx)
+	}
+	defer func() {
+		tracing.EndStepSpan(span, err)
+	}()
 	if e.metrics != nil {
 		start := time.Now()
 		defer func() {
@@ -188,7 +218,9 @@ func (e *StepExecutor) atomicRun(
 	if len(topics) > 0 {
 		result.MessageType = eventType
 		result.FromStep = stp.Name()
-
+		if e.tracingEnabled {
+			tracing.InjectTraceContext(ctx, &result)
+		}
 		if err := e.writer.WriteMessages(ctx, result, tx, topics, stp.Name()); err != nil {
 			return message.Message{}, retry.AsRetryable(fmt.Errorf("outbox write: %w", err))
 		}
@@ -297,7 +329,9 @@ func (e *StepExecutor) runErrorHandler(
 		if len(topics) > 0 {
 			result.MessageType = eventType
 			result.FromStep = stp.Name()
-
+			if e.tracingEnabled {
+				tracing.InjectTraceContext(retryCtx, &result)
+			}
 			if writeErr := e.writer.WriteMessages(retryCtx, result, tx, topics, stp.Name()); writeErr != nil {
 				return retry.AsRetryable(fmt.Errorf("outbox write: %w", writeErr))
 			}
