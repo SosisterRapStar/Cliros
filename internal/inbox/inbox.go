@@ -48,7 +48,7 @@ func (in *Inbox) Claim(ctx context.Context, tx database.TxQueryer, msg message.M
 func (in *Inbox) buildInsertClaimQueryPostgres() string {
 	p := in.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
-INSERT INTO inbox (saga_id, from_step) VALUES (%s, %s)
+INSERT INTO public.inbox (saga_id, from_step) VALUES (%s, %s)
 ON CONFLICT (saga_id, from_step) DO NOTHING
 RETURNING saga_id`, p(1), p(2)) //nolint: mnd
 }

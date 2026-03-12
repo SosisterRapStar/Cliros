@@ -208,7 +208,7 @@ SELECT
 FROM %s
 WHERE scheduled_at <= NOW() AND processed_at IS NULL
 ORDER BY created_at ASC 
-LIMIT %s`, "outbox", p(1))
+LIMIT %s`, "public.outbox", p(1))
 }
 
 // buildUpdateOnErrQuery строит UPDATE-запрос при ошибке публикации.
@@ -224,7 +224,7 @@ SET
 WHERE 
 	saga_id = %s 
 	AND step_name = %s`,
-		"outbox", p(3), p(4), p(1), p(2)) //nolint:mnd
+		"public.outbox", p(3), p(4), p(1), p(2)) //nolint:mnd
 }
 
 // buildUpdateOnSuccessQuery строит UPDATE-запрос при успешной публикации.
@@ -238,7 +238,7 @@ SET
 WHERE 
 	saga_id = %s 
 	AND step_name = %s`,
-		"outbox", p(3), p(1), p(2)) //nolint:mnd
+		"public.outbox", p(3), p(1), p(2)) //nolint:mnd
 }
 
 func (r *Reader) updateOutboxOnSuccess(
@@ -303,11 +303,11 @@ func fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, error) {
 }
 
 func (r *Reader) scanBatch(ctx context.Context) (int, error) {
-	// logger.Info("scanning batch")
+	logger.Info("scanning batch")
 	rowsCounter := 0
 
 	query := r.buildBatchQuery()
-	// logger.Infof("scanning batch query: %s", query)
+	logger.Infof("scanning batch query: %s", query)
 	rows, err := r.dbCtx.DB().QueryContext(ctx, query, 10)
 	if err != nil {
 		return 0, err
