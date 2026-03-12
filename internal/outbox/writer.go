@@ -53,7 +53,7 @@ func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName st
 		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	return &OutboxMessage{
 		SagaID:         sagaUUID,
 		StepName:       stepName,

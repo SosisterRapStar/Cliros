@@ -12,6 +12,7 @@ import (
 	"github.com/SosisterRapStar/LETI-paper/broker"
 	"github.com/SosisterRapStar/LETI-paper/database"
 	"github.com/SosisterRapStar/LETI-paper/message"
+	"github.com/bytedance/gopkg/util/logger"
 )
 
 const (
@@ -127,7 +128,7 @@ func (r *Reader) Close() {
 }
 
 func (r *Reader) polling(userCtx context.Context) {
-	ticker := time.NewTicker(r.PollingSettings.interval)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -138,6 +139,7 @@ func (r *Reader) polling(userCtx context.Context) {
 			return
 
 		case <-ticker.C:
+			logger.Info("polling outbox")
 			readed, err := r.scanBatch(userCtx)
 			if err != nil {
 				r.sendError(fmt.Errorf("outbox scan batch: %w", err))
@@ -301,10 +303,12 @@ func fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, error) {
 }
 
 func (r *Reader) scanBatch(ctx context.Context) (int, error) {
+	logger.Info("scanning batch")
 	rowsCounter := 0
 
 	query := r.buildBatchQuery()
-	rows, err := r.dbCtx.DB().QueryContext(ctx, query, r.PollingSettings.batchSize)
+	logger.Infof("scanning batch query: %s", query)
+	rows, err := r.dbCtx.DB().QueryContext(ctx, query, 10)
 	if err != nil {
 		return 0, err
 	}

@@ -9,7 +9,7 @@ var (
 		step_name 		TEXT NOT NULL,
 		topic 			TEXT NOT NULL, 
 		created_at 		TIMESTAMP NOT NULL,
-		scheduled_at 	TIMESTAMP,
+		scheduled_at 	TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
 		metadata 		BYTEA,
 		payload 		BYTEA NOT NULL,
 		attempts_counter INTEGER DEFAULT 0,
@@ -23,6 +23,7 @@ var (
 	CREATE INDEX IF NOT EXISTS idx_saga_outbox_created_at ON saga.outbox (created_at);
 	CREATE INDEX IF NOT EXISTS idx_saga_outbox_scheduled_at ON saga.outbox (scheduled_at);
 	`
+
 	MySQLOutboxMigration = `
 	CREATE TABLE IF NOT EXISTS outbox (
 		saga_id             CHAR(36) NOT NULL,
@@ -48,15 +49,16 @@ var (
 	CREATE TABLE IF NOT EXISTS saga.inbox (
 		saga_id   UUID NOT NULL,
 		from_step TEXT NOT NULL,
-		created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+		created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
 		PRIMARY KEY (saga_id, from_step)
 	);
 	`
+
 	MySQLInboxMigration = `
 	CREATE TABLE IF NOT EXISTS inbox (
 		saga_id   CHAR(36) NOT NULL,
 		from_step VARCHAR(255) NOT NULL,
-		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		created_at DATETIME NOT NULL DEFAULT UTC_TIMESTAMP(),
 		PRIMARY KEY (saga_id, from_step)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 	`
