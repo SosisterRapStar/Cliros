@@ -208,7 +208,7 @@ SELECT
 FROM %s
 WHERE scheduled_at <= NOW() AND processed_at IS NULL
 ORDER BY created_at ASC 
-LIMIT %s`, "saga.outbox", p(1))
+LIMIT %s`, "outbox", p(1))
 }
 
 // buildUpdateOnErrQuery строит UPDATE-запрос при ошибке публикации.
@@ -224,7 +224,7 @@ SET
 WHERE 
 	saga_id = %s 
 	AND step_name = %s`,
-		"saga.outbox", p(3), p(4), p(1), p(2)) //nolint:mnd
+		"outbox", p(3), p(4), p(1), p(2)) //nolint:mnd
 }
 
 // buildUpdateOnSuccessQuery строит UPDATE-запрос при успешной публикации.
@@ -238,7 +238,7 @@ SET
 WHERE 
 	saga_id = %s 
 	AND step_name = %s`,
-		"saga.outbox", p(3), p(1), p(2)) //nolint:mnd
+		"outbox", p(3), p(1), p(2)) //nolint:mnd
 }
 
 func (r *Reader) updateOutboxOnSuccess(

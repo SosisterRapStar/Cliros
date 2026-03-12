@@ -2,8 +2,6 @@ package outbox
 
 var (
 	PostgresOutboxMigration = `
-	CREATE SCHEMA IF NOT EXISTS saga;
-
 	CREATE TABLE IF NOT EXISTS saga.outbox (
 		saga_id 		UUID NOT NULL,
 		step_name 		TEXT NOT NULL,
@@ -44,9 +42,7 @@ var (
 	`
 
 	PostgresInboxMigration = `
-	CREATE SCHEMA IF NOT EXISTS saga;
-
-	CREATE TABLE IF NOT EXISTS saga.inbox (
+	CREATE TABLE IF NOT EXISTS inbox (
 		saga_id   UUID NOT NULL,
 		from_step TEXT NOT NULL,
 		created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
