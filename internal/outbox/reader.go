@@ -303,11 +303,11 @@ func fromOutboxToSagaMessage(oMsg *OutboxMessage) (message.Message, error) {
 }
 
 func (r *Reader) scanBatch(ctx context.Context) (int, error) {
-	logger.Info("scanning batch")
+	// logger.Info("scanning batch")
 	rowsCounter := 0
 
 	query := r.buildBatchQuery()
-	logger.Infof("scanning batch query: %s", query)
+	// logger.Infof("scanning batch query: %s", query)
 	rows, err := r.dbCtx.DB().QueryContext(ctx, query, 10)
 	if err != nil {
 		return 0, err
