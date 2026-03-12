@@ -2,7 +2,7 @@ package outbox
 
 var (
 	PostgresOutboxMigration = `
-	CREATE TABLE IF NOT EXISTS outbox (
+	CREATE TABLE IF NOT EXISTS public.outbox (
 		saga_id 		UUID NOT NULL,
 		step_name 		TEXT NOT NULL,
 		topic 			TEXT NOT NULL, 
@@ -17,9 +17,9 @@ var (
 		PRIMARY KEY (saga_id, step_name)
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_saga_outbox_topic ON outbox (topic);
-	CREATE INDEX IF NOT EXISTS idx_saga_outbox_created_at ON outbox (created_at);
-	CREATE INDEX IF NOT EXISTS idx_saga_outbox_scheduled_at ON outbox (scheduled_at);
+	CREATE INDEX IF NOT EXISTS idx_saga_outbox_topic ON public.outbox (topic);
+	CREATE INDEX IF NOT EXISTS idx_saga_outbox_created_at ON public.outbox (created_at);
+	CREATE INDEX IF NOT EXISTS idx_saga_outbox_scheduled_at ON public.outbox (scheduled_at);
 	`
 
 	MySQLOutboxMigration = `
@@ -42,7 +42,7 @@ var (
 	`
 
 	PostgresInboxMigration = `
-	CREATE TABLE IF NOT EXISTS inbox (
+	CREATE TABLE IF NOT EXISTS public.inbox (
 		saga_id   UUID NOT NULL,
 		from_step TEXT NOT NULL,
 		created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
