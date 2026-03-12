@@ -48,7 +48,7 @@ func (in *Inbox) Claim(ctx context.Context, tx database.TxQueryer, msg message.M
 func (in *Inbox) buildInsertClaimQueryPostgres() string {
 	p := in.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
-INSERT INTO saga.inbox (saga_id, from_step) VALUES (%s, %s)
+INSERT INTO inbox (saga_id, from_step) VALUES (%s, %s)
 ON CONFLICT (saga_id, from_step) DO NOTHING
 RETURNING saga_id`, p(1), p(2)) //nolint: mnd
 }
@@ -69,7 +69,7 @@ func (in *Inbox) claimPostgres(ctx context.Context, tx database.TxQueryer, sagaU
 func (in *Inbox) buildInsertClaimQueryMySQL() string {
 	p := in.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
-INSERT INTO saga.inbox (saga_id, from_step) VALUES (%s, %s)
+INSERT INTO inbox (saga_id, from_step) VALUES (%s, %s)
 ON DUPLICATE KEY UPDATE from_step = VALUES(from_step)`, p(1), p(2)) //nolint: mnd
 }
 

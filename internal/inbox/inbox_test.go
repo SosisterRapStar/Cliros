@@ -37,7 +37,7 @@ func TestInbox_Claim_Postgres_Success(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	mock.ExpectQuery("INSERT INTO saga.inbox").
+	mock.ExpectQuery("INSERT INTO inbox").
 		WithArgs(sagaUUID, "order-service").
 		WillReturnRows(sqlmock.NewRows([]string{"saga_id"}).AddRow(sagaUUID))
 
@@ -72,7 +72,7 @@ func TestInbox_Claim_Postgres_Duplicate(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	mock.ExpectQuery("INSERT INTO saga.inbox").
+	mock.ExpectQuery("INSERT INTO inbox").
 		WithArgs(uuid.MustParse(testSagaID), "order-service").
 		WillReturnRows(sqlmock.NewRows([]string{"saga_id"}))
 
@@ -144,7 +144,7 @@ func TestInbox_Claim_Postgres_QueryError(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	mock.ExpectQuery("INSERT INTO saga.inbox").
+	mock.ExpectQuery("INSERT INTO inbox").
 		WithArgs(uuid.MustParse(testSagaID), "order-service").
 		WillReturnError(sql.ErrConnDone)
 
@@ -182,7 +182,7 @@ func TestInbox_Claim_MySQL_Success(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	mock.ExpectExec("INSERT INTO saga.inbox").
+	mock.ExpectExec("INSERT INTO inbox").
 		WithArgs(testSagaID, "order-service").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -217,7 +217,7 @@ func TestInbox_Claim_MySQL_Duplicate(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	mock.ExpectExec("INSERT INTO saga.inbox").
+	mock.ExpectExec("INSERT INTO inbox").
 		WithArgs(testSagaID, "order-service").
 		WillReturnResult(sqlmock.NewResult(0, 2))
 

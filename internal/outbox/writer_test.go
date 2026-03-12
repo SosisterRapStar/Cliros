@@ -41,7 +41,7 @@ func TestWriter_WriteMessages_Success_OneTopic(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	mock.ExpectExec("INSERT INTO saga.outbox").
+	mock.ExpectExec("INSERT INTO outbox").
 		WithArgs(
 			uuid.MustParse(testWriterSagaID),
 			"order-service",
@@ -83,10 +83,10 @@ func TestWriter_WriteMessages_Success_TwoTopics(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	mock.ExpectExec("INSERT INTO saga.outbox").
+	mock.ExpectExec("INSERT INTO outbox").
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "topic1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO saga.outbox").
+	mock.ExpectExec("INSERT INTO outbox").
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "topic2", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -153,7 +153,7 @@ func TestWriter_WriteMessages_ExecError(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	mock.ExpectExec("INSERT INTO saga.outbox").
+	mock.ExpectExec("INSERT INTO outbox").
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnError(sql.ErrConnDone)
 
@@ -181,7 +181,7 @@ func TestWriter_WriteTx_Success(t *testing.T) {
 	ctx := context.Background()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO saga.outbox").
+	mock.ExpectExec("INSERT INTO outbox").
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -216,7 +216,7 @@ func TestWriter_WriteTx_Success_WithTxWorkFunc(t *testing.T) {
 	}
 
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO saga.outbox").
+	mock.ExpectExec("INSERT INTO outbox").
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -271,7 +271,7 @@ func TestWriter_WriteTx_CommitError(t *testing.T) {
 	ctx := context.Background()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO saga.outbox").
+	mock.ExpectExec("INSERT INTO outbox").
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit().WillReturnError(sql.ErrTxDone)
