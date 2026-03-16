@@ -1,4 +1,5 @@
 # Cliros
+<img width="1384" height="1040" alt="Untitled design (1)" src="https://github.com/user-attachments/assets/c4b3ceaa-d520-4f76-aeef-157d4c17ec7c" />
 
 Go-библиотека для реализации паттерна **Choreography Saga** в распределённых системах с гарантированной доставкой сообщений через **Outbox/Inbox**.
 
