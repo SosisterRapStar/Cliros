@@ -34,7 +34,7 @@ Go-библиотека для реализации паттерна **Choreogra
 ## Установка
 
 ```bash
-go get github.com/SosisterRapStar/LETI-paper
+go get github.com/SosisterRapStar/Cliros
 ```
 
 Требуется Go 1.21+.
@@ -49,7 +49,7 @@ go get github.com/SosisterRapStar/LETI-paper
 import (
     "database/sql"
     _ "github.com/jackc/pgx/v5/stdlib"
-    "github.com/SosisterRapStar/LETI-paper/database"
+    "github.com/SosisterRapStar/Cliros/database"
 )
 
 db, err := sql.Open("pgx", "postgres://user:pass@localhost:5432/mydb?sslmode=disable")
@@ -79,9 +79,9 @@ type Subscriber interface {
 
 ```go
 import (
-    "github.com/SosisterRapStar/LETI-paper/controller"
-    "github.com/SosisterRapStar/LETI-paper/retry"
-    "github.com/SosisterRapStar/LETI-paper/backoff"
+    "github.com/SosisterRapStar/Cliros/controller"
+    "github.com/SosisterRapStar/Cliros/retry"
+    "github.com/SosisterRapStar/Cliros/backoff"
 )
 
 errCh := make(chan error, 128)
@@ -121,9 +121,9 @@ if err != nil { /* ... */ }
 
 ```go
 import (
-    "github.com/SosisterRapStar/LETI-paper/step"
-    "github.com/SosisterRapStar/LETI-paper/database"
-    "github.com/SosisterRapStar/LETI-paper/message"
+    "github.com/SosisterRapStar/Cliros/step"
+    "github.com/SosisterRapStar/Cliros/database"
+    "github.com/SosisterRapStar/Cliros/message"
 )
 
 orderStep, err := step.New(&step.StepParams{
