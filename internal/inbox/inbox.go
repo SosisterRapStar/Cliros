@@ -48,9 +48,9 @@ func (in *Inbox) Claim(ctx context.Context, tx database.TxQueryer, msg message.M
 func (in *Inbox) buildInsertClaimQueryPostgres() string {
 	p := in.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
-INSERT INTO public.inbox (saga_id, from_step) VALUES (%s, %s)
+INSERT INTO %s (saga_id, from_step) VALUES (%s, %s)
 ON CONFLICT (saga_id, from_step) DO NOTHING
-RETURNING saga_id`, p(1), p(2)) //nolint: mnd
+RETURNING saga_id`, qualifiedInboxTable(in.dbCtx.Dialect()), p(1), p(2)) //nolint: mnd
 }
 
 func (in *Inbox) claimPostgres(ctx context.Context, tx database.TxQueryer, sagaUUID uuid.UUID, fromStep string) error {
@@ -69,8 +69,8 @@ func (in *Inbox) claimPostgres(ctx context.Context, tx database.TxQueryer, sagaU
 func (in *Inbox) buildInsertClaimQueryMySQL() string {
 	p := in.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
-INSERT INTO inbox (saga_id, from_step) VALUES (%s, %s)
-ON DUPLICATE KEY UPDATE from_step = VALUES(from_step)`, p(1), p(2)) //nolint: mnd
+INSERT INTO %s (saga_id, from_step) VALUES (%s, %s)
+ON DUPLICATE KEY UPDATE from_step = VALUES(from_step)`, qualifiedInboxTable(in.dbCtx.Dialect()), p(1), p(2)) //nolint: mnd
 }
 
 func (in *Inbox) claimMySQL(ctx context.Context, tx database.TxQueryer, sagaUUID uuid.UUID, fromStep string) error {

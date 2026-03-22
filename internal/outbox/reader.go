@@ -208,7 +208,7 @@ SELECT
 FROM %s
 WHERE scheduled_at <= NOW() AND processed_at IS NULL
 ORDER BY created_at ASC 
-LIMIT %s`, "public.outbox", p(1))
+LIMIT %s`, qualifiedOutboxTable(r.dbCtx.Dialect()), p(1))
 }
 
 // buildUpdateOnErrQuery строит UPDATE-запрос при ошибке публикации.
@@ -221,10 +221,10 @@ SET
 	attempts_counter = attempts_counter + 1,
 	last_attempt = %s,
 	scheduled_at = %s
-WHERE 
+	WHERE 
 	saga_id = %s 
 	AND step_name = %s`,
-		"public.outbox", p(3), p(4), p(1), p(2)) //nolint:mnd
+		qualifiedOutboxTable(r.dbCtx.Dialect()), p(3), p(4), p(1), p(2)) //nolint:mnd
 }
 
 // buildUpdateOnSuccessQuery строит UPDATE-запрос при успешной публикации.
@@ -235,10 +235,10 @@ func (r *Reader) buildUpdateOnSuccessQuery() string {
 UPDATE %s
 SET 
 	processed_at = %s
-WHERE 
+	WHERE 
 	saga_id = %s 
 	AND step_name = %s`,
-		"public.outbox", p(3), p(1), p(2)) //nolint:mnd
+		qualifiedOutboxTable(r.dbCtx.Dialect()), p(3), p(1), p(2)) //nolint:mnd
 }
 
 func (r *Reader) updateOutboxOnSuccess(

@@ -33,7 +33,7 @@ INSERT INTO %s (
 	saga_id, step_name, topic,
 	created_at, scheduled_at, metadata, payload
 ) VALUES (%s, %s, %s, %s, %s, %s, %s)`,
-		"public.outbox",
+		qualifiedOutboxTable(w.dbCtx.Dialect()),
 		p(1), p(2), p(3), p(4), p(5), p(6), p(7)) //nolint:mnd
 }
 
