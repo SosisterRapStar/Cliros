@@ -5,7 +5,6 @@ go 1.25.4
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/IBM/sarama v1.47.0
-	github.com/SosisterRapStar/LETI-paper v0.0.0-20260318233320-aee62218c5f1
 	github.com/bytedance/gopkg v0.1.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
