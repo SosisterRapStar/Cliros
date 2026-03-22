@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/SosisterRapStar/LETI-paper/database"
-	"github.com/SosisterRapStar/LETI-paper/message"
-	"github.com/SosisterRapStar/LETI-paper/retry"
+	"github.com/SosisterRapStar/cliros/database"
+	"github.com/SosisterRapStar/cliros/message"
+	"github.com/SosisterRapStar/cliros/retry"
 )
 
 // Action -- пользовательский хэндлер для выполнения или компенсации шага саги.

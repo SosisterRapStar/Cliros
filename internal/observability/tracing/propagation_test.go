@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/SosisterRapStar/LETI-paper/message"
+	"github.com/SosisterRapStar/cliros/message"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 )

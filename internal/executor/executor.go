@@ -8,14 +8,14 @@ import (
 
 	"github.com/bytedance/gopkg/util/logger"
 
-	"github.com/SosisterRapStar/LETI-paper/database"
-	"github.com/SosisterRapStar/LETI-paper/internal/inbox"
-	"github.com/SosisterRapStar/LETI-paper/internal/observability/metrics"
-	"github.com/SosisterRapStar/LETI-paper/internal/observability/tracing"
-	"github.com/SosisterRapStar/LETI-paper/internal/outbox"
-	"github.com/SosisterRapStar/LETI-paper/message"
-	"github.com/SosisterRapStar/LETI-paper/retry"
-	"github.com/SosisterRapStar/LETI-paper/step"
+	"github.com/SosisterRapStar/cliros/database"
+	"github.com/SosisterRapStar/cliros/internal/inbox"
+	"github.com/SosisterRapStar/cliros/internal/observability/metrics"
+	"github.com/SosisterRapStar/cliros/internal/observability/tracing"
+	"github.com/SosisterRapStar/cliros/internal/outbox"
+	"github.com/SosisterRapStar/cliros/message"
+	"github.com/SosisterRapStar/cliros/retry"
+	"github.com/SosisterRapStar/cliros/step"
 
 	"go.opentelemetry.io/otel/trace"
 )

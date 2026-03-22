@@ -9,12 +9,12 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/SosisterRapStar/LETI-paper/backoff"
-	"github.com/SosisterRapStar/LETI-paper/controller"
-	"github.com/SosisterRapStar/LETI-paper/database"
-	"github.com/SosisterRapStar/LETI-paper/message"
-	"github.com/SosisterRapStar/LETI-paper/retry"
-	"github.com/SosisterRapStar/LETI-paper/step"
+	"github.com/SosisterRapStar/cliros/backoff"
+	"github.com/SosisterRapStar/cliros/controller"
+	"github.com/SosisterRapStar/cliros/database"
+	"github.com/SosisterRapStar/cliros/message"
+	"github.com/SosisterRapStar/cliros/retry"
+	"github.com/SosisterRapStar/cliros/step"
 )
 
 type stubPubsub struct{}

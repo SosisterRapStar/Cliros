@@ -8,9 +8,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/SosisterRapStar/LETI-paper/database"
-	"github.com/SosisterRapStar/LETI-paper/message"
-	"github.com/SosisterRapStar/LETI-paper/retry"
+	"github.com/SosisterRapStar/cliros/database"
+	"github.com/SosisterRapStar/cliros/message"
+	"github.com/SosisterRapStar/cliros/retry"
 )
 
 // ErrDuplicate возвращается, когда входящее saga-сообщение уже было обработано (дубликат по ключу идемпотентности).

@@ -3,7 +3,7 @@ package tracing
 import (
 	"testing"
 
-	"github.com/SosisterRapStar/LETI-paper/message"
+	"github.com/SosisterRapStar/cliros/message"
 	"go.opentelemetry.io/otel/propagation"
 )
 

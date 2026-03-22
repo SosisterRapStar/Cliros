@@ -8,7 +8,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/SosisterRapStar/LETI-paper/message"
+	"github.com/SosisterRapStar/cliros/message"
 )
 
 type Client struct {

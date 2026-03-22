@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/SosisterRapStar/LETI-paper/backoff"
+	"github.com/SosisterRapStar/cliros/backoff"
 )
 
 var (

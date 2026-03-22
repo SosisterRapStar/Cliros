@@ -8,10 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/SosisterRapStar/LETI-paper/backoff"
-	"github.com/SosisterRapStar/LETI-paper/broker"
-	"github.com/SosisterRapStar/LETI-paper/database"
-	"github.com/SosisterRapStar/LETI-paper/message"
+	"github.com/SosisterRapStar/cliros/backoff"
+	"github.com/SosisterRapStar/cliros/broker"
+	"github.com/SosisterRapStar/cliros/database"
+	"github.com/SosisterRapStar/cliros/message"
 	"github.com/bytedance/gopkg/util/logger"
 )
 

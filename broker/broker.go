@@ -3,7 +3,7 @@ package broker
 import (
 	"context"
 
-	"github.com/SosisterRapStar/LETI-paper/message"
+	"github.com/SosisterRapStar/cliros/message"
 )
 
 type Publisher interface {

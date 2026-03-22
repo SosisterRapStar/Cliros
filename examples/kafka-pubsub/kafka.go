@@ -25,7 +25,7 @@ import (
 
 	"github.com/IBM/sarama"
 
-	"github.com/SosisterRapStar/LETI-paper/message"
+	"github.com/SosisterRapStar/cliros/message"
 )
 
 // KafkaConfig — настройки подключения к Kafka.
@@ -174,7 +174,7 @@ func (k *Kafka) Run(ctx context.Context) error {
 
 type kafkaConsumer struct {
 	handlers map[string]func(context.Context, message.Message) error
-	mu      *sync.RWMutex
+	mu       *sync.RWMutex
 }
 
 func (c *kafkaConsumer) Setup(sarama.ConsumerGroupSession) error   { return nil }
