@@ -3,6 +3,7 @@ package retry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/SosisterRapStar/cliros/backoff"
@@ -52,7 +53,8 @@ func (r *Retrier) Retry(ctx context.Context, work work) error {
 func (r *Retrier) retry(ctx context.Context, work work) error {
 	var (
 		retryable *RetryableError
-		retries   uint = 0
+		retries   uint
+		lastErr   error
 	)
 	for {
 		select {
@@ -60,12 +62,19 @@ func (r *Retrier) retry(ctx context.Context, work work) error {
 			return ctx.Err()
 		default:
 			if retries >= r.MaxRetries {
+				if lastErr != nil {
+					return fmt.Errorf("%w: %w", ErrMaxRetriesExceeded, lastErr)
+				}
 				return ErrMaxRetriesExceeded
 			}
 			err := work(ctx)
+			if err == nil {
+				return nil
+			}
 			if !errors.As(err, &retryable) {
 				return err
 			}
+			lastErr = err
 			err = sleep(ctx,
 				r.BackoffPolicy.
 					CalcBackoff(retries,

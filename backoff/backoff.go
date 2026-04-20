@@ -6,55 +6,86 @@ import (
 	"time"
 )
 
+const defaultExpFactor = 2.0
+
 type BackoffPolicy interface {
 	CalcBackoff(retryNumber uint, minBackoff, maxBackoff time.Duration) time.Duration
 }
 
+// Expontential реализует экспоненциальный backoff: minBackoff * factor^(retryNumber-1).
+// Если ExpFactor <= 1 — используется значение по умолчанию (2.0).
+// Для retryNumber == 0 возвращается minBackoff.
+// Если maxBackoff > 0 — результат ограничивается сверху maxBackoff.
 type Expontential struct {
-	expFactor float64
+	ExpFactor float64
+}
+
+func NewExpontential(factor float64) Expontential {
+	if factor <= 1 {
+		factor = defaultExpFactor
+	}
+	return Expontential{ExpFactor: factor}
 }
 
 func (e Expontential) CalcBackoff(retryNumber uint, minBackoff, maxBackoff time.Duration) time.Duration {
-	var (
-		nillDur time.Duration
-	)
-	if retryNumber <= 0 {
+	if retryNumber == 0 {
 		return minBackoff
 	}
-	newBackoff := 1.0 + float64(retryNumber-1)*e.expFactor
 
-	// если плато бэкоффа не указано - то увеличиваем бесконечно
-	if maxBackoff != nillDur {
-		return time.Duration(math.Ceil(min(newBackoff, float64(maxBackoff))))
-	} else {
-		return time.Duration(math.Ceil(newBackoff))
+	factor := e.ExpFactor
+	if factor <= 1 {
+		factor = defaultExpFactor
 	}
+
+	base := float64(minBackoff)
+	if base <= 0 {
+		base = 1
+	}
+
+	backoff := base * math.Pow(factor, float64(retryNumber-1))
+	if maxBackoff > 0 && backoff > float64(maxBackoff) {
+		return maxBackoff
+	}
+	return time.Duration(backoff)
 }
 
+// ExpontentialWithJitter — экспоненциальный backoff с джиттером:
+// значение выбирается случайно в диапазоне [minBackoff, backoff], где
+// backoff = minBackoff * factor^(retryNumber-1), ограниченный maxBackoff.
 type ExpontentialWithJitter struct {
-	expFactor float64
+	ExpFactor float64
+}
+
+func NewExpontentialWithJitter(factor float64) ExpontentialWithJitter {
+	if factor <= 1 {
+		factor = defaultExpFactor
+	}
+	return ExpontentialWithJitter{ExpFactor: factor}
 }
 
 func (e ExpontentialWithJitter) CalcBackoff(retryNumber uint, minBackoff, maxBackoff time.Duration) time.Duration {
-	var (
-		nillDur time.Duration
-	)
-	if retryNumber <= 0 {
+	if retryNumber == 0 {
 		return minBackoff
 	}
 
-	baseBackoff := 1.0 + float64(retryNumber-1)*e.expFactor
-
-	var cappedBackoff float64
-	if maxBackoff != nillDur {
-		cappedBackoff = min(baseBackoff, float64(maxBackoff))
-	} else {
-		cappedBackoff = baseBackoff
+	factor := e.ExpFactor
+	if factor <= 1 {
+		factor = defaultExpFactor
 	}
 
-	jitteredBackoff := rand.Float64() * cappedBackoff //nolint: gosec
+	base := float64(minBackoff)
+	if base <= 0 {
+		base = 1
+	}
 
-	result := math.Max(jitteredBackoff, float64(minBackoff))
+	cappedBackoff := base * math.Pow(factor, float64(retryNumber-1))
+	if maxBackoff > 0 && cappedBackoff > float64(maxBackoff) {
+		cappedBackoff = float64(maxBackoff)
+	}
+
+	jittered := rand.Float64() * cappedBackoff //nolint:gosec
+
+	result := math.Max(jittered, float64(minBackoff))
 
 	return time.Duration(math.Ceil(result))
 }
