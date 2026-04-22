@@ -30,14 +30,14 @@ func (w *Writer) buildInsertQuery() string {
 	p := w.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
 INSERT INTO %s (
-	saga_id, step_name, topic,
+	saga_id, step_name, topic, saga_type,
 	created_at, scheduled_at, metadata, payload
-) VALUES (%s, %s, %s, %s, %s, %s, %s)`,
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)`,
 		qualifiedOutboxTable(w.dbCtx.Dialect()),
-		p(1), p(2), p(3), p(4), p(5), p(6), p(7)) //nolint:mnd
+		p(1), p(2), p(3), p(4), p(5), p(6), p(7), p(8)) //nolint:mnd
 }
 
-func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName string) (*OutboxMessage, error) {
+func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName string, sagaType SagaType) (*OutboxMessage, error) {
 	sagaUUID, err := uuid.Parse(msg.SagaID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid saga_id format: %w", err)
@@ -58,6 +58,7 @@ func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName st
 		SagaID:         sagaUUID,
 		StepName:       stepName,
 		Topic:          topic,
+		SagaType:       sagaType,
 		CreatedAt:      now,
 		ScheduledAt:    now,
 		Metadata:       metadataBytes,
@@ -69,8 +70,8 @@ func (w *Writer) fromSagaToOutboxMessage(msg message.Message, topic, stepName st
 }
 
 // write сохраняет сообщение в outbox таблицу
-func (w *Writer) write(ctx context.Context, msg message.Message, tx database.TxQueryer, topic, stepName string) error {
-	outboxMsg, err := w.fromSagaToOutboxMessage(msg, topic, stepName)
+func (w *Writer) write(ctx context.Context, msg message.Message, tx database.TxQueryer, topic, stepName string, sagaType SagaType) error {
+	outboxMsg, err := w.fromSagaToOutboxMessage(msg, topic, stepName, sagaType)
 	if err != nil {
 		return fmt.Errorf("outbox convert message: %w", err)
 	}
@@ -80,22 +81,32 @@ func (w *Writer) write(ctx context.Context, msg message.Message, tx database.TxQ
 		outboxMsg.SagaID,
 		outboxMsg.StepName,
 		outboxMsg.Topic,
+		string(outboxMsg.SagaType),
 		outboxMsg.CreatedAt,
 		outboxMsg.ScheduledAt,
 		outboxMsg.Metadata,
 		outboxMsg.Payload,
 	)
 	if err != nil {
-		return fmt.Errorf("outbox insert [saga_id=%s, step=%s, topic=%s]: %w", outboxMsg.SagaID, stepName, topic, err)
+		return fmt.Errorf("outbox insert [saga_id=%s, step=%s, topic=%s, saga_type=%s]: %w",
+			outboxMsg.SagaID, stepName, topic, sagaType, err)
 	}
 
 	return nil
 }
 
-// WriteMessages запишет внутри транзации сообщения в базку для каждого топика
-func (w *Writer) WriteMessages(ctx context.Context, msg message.Message, tx database.TxQueryer, topics []string, stepName string) error {
+// WriteMessages запишет внутри транзации сообщения в базку для каждого топика.
+// sagaType отличает execute- и compensate-записи одного шага (входит в PK outbox).
+func (w *Writer) WriteMessages(
+	ctx context.Context,
+	msg message.Message,
+	tx database.TxQueryer,
+	topics []string,
+	stepName string,
+	sagaType SagaType,
+) error {
 	for _, topic := range topics {
-		if err := w.write(ctx, msg, tx, topic, stepName); err != nil {
+		if err := w.write(ctx, msg, tx, topic, stepName, sagaType); err != nil {
 			return err
 		}
 	}
@@ -103,12 +114,14 @@ func (w *Writer) WriteMessages(ctx context.Context, msg message.Message, tx data
 }
 
 // WriteTx начинает транзакцию, вызывает бизнес функцию пользователя, которая должна произойти перед
-// отправкой сообщения в outbox
+// отправкой сообщения в outbox.
+// sagaType отличает execute- и compensate-записи одного шага (входит в PK outbox).
 func (w *Writer) WriteTx(
 	ctx context.Context,
 	msg message.Message,
 	topics []string,
 	stepName string,
+	sagaType SagaType,
 	fn TxWorkFunc,
 ) error {
 	tx, err := w.dbCtx.DB().BeginTx(ctx, nil)
@@ -124,7 +137,7 @@ func (w *Writer) WriteTx(
 		}
 	}
 
-	if err := w.WriteMessages(ctx, msg, tx, topics, stepName); err != nil {
+	if err := w.WriteMessages(ctx, msg, tx, topics, stepName, sagaType); err != nil {
 		return err
 	}
 

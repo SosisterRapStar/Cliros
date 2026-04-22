@@ -1,10 +1,13 @@
 package outbox
 
-// NOTE (временное решение): PRIMARY KEY установлен на (saga_id, topic).
-// Так как один шаг агрегирует в себе execute- и compensate-части, раньше PK
-// (saga_id, step_name) не позволял хранить больше одного сообщения от шага
-// в рамках саги. Переносить уникальность на topic — минимально инвазивный
-// компромисс, не требующий менять payload/meta.
+// NOTE (временное решение): PRIMARY KEY установлен на (saga_id, topic, saga_type).
+// Один шаг саги содержит и execute-, и compensate-части, каждая из которых
+// может отправлять сообщения в один и тот же топик. PK (saga_id, step_name)
+// не позволял держать больше одного сообщения от шага; PK (saga_id, topic)
+// решал часть проблемы, но всё ещё ловил коллизию, когда execute и compensate
+// одного шага пишут в один топик. Поэтому в ключ добавлен saga_type
+// ('execute' | 'compensate') — минимально инвазивный компромисс, не
+// требующий менять payload/meta.
 //
 // TODO: в идеале каждому исходящему сообщению нужно присваивать event_id
 // (например, hash(saga_id + from_step + monotonic_seq или аналогичный
@@ -17,6 +20,7 @@ var (
 		saga_id 		UUID NOT NULL,
 		step_name 		TEXT NOT NULL,
 		topic 			TEXT NOT NULL, 
+		saga_type       TEXT NOT NULL,
 		created_at 		TIMESTAMP NOT NULL,
 		scheduled_at 	TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
 		metadata 		BYTEA,
@@ -25,7 +29,7 @@ var (
 		last_attempt    TIMESTAMP,
 		processed_at 	TIMESTAMP,
 		
-		PRIMARY KEY (saga_id, topic)
+		PRIMARY KEY (saga_id, topic, saga_type)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_saga_outbox_step_name ON public.outbox (step_name);
@@ -38,6 +42,7 @@ var (
 		saga_id             CHAR(36) NOT NULL,
 		step_name           VARCHAR(255) NOT NULL,
 		topic               VARCHAR(255) NOT NULL,
+		saga_type           VARCHAR(32) NOT NULL,
 		created_at          DATETIME NOT NULL,
 		scheduled_at        DATETIME,
 		metadata            LONGBLOB,
@@ -45,7 +50,7 @@ var (
 		attempts_counter    INT DEFAULT 0,
 		last_attempt        DATETIME,
 		processed_at        DATETIME,
-		PRIMARY KEY (saga_id, topic),
+		PRIMARY KEY (saga_id, topic, saga_type),
 		INDEX idx_outbox_step_name (step_name),
 		INDEX idx_outbox_created_at (created_at),
 		INDEX idx_outbox_scheduled_at (scheduled_at)

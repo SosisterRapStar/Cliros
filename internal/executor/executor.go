@@ -105,7 +105,7 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 	routing := stp.GetRouting()
 
 	outMsg, err = e.runWithUserRetry(ctx, stp, msg, stp.GetExecute(),
-		message.EventTypeComplete, routing.NextStepTopics, stp.GetRetryPolicy())
+		message.EventTypeComplete, routing.NextStepTopics, outbox.SagaTypeExecute, stp.GetRetryPolicy())
 	if err == nil {
 		logger.Info("execute action committed, messages written to outbox")
 		return outMsg, nil
@@ -116,12 +116,12 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 		if errors.Is(err, inbox.ErrDuplicate) { // if saga already processed
 			return message.Message{}, nil
 		}
-		return message.Message{}, e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics)
+		return message.Message{}, e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics, outbox.SagaTypeExecute)
 	}
 
 	// Сообщение из OnError уходит в NextStepTopics с типом Complete — сага продолжается.
 	outMsg, handlerErr := e.runErrorHandler(ctx, stp, msg, err, errHandler,
-		message.EventTypeComplete, routing.NextStepTopics)
+		message.EventTypeComplete, routing.NextStepTopics, outbox.SagaTypeExecute)
 	if handlerErr == nil {
 		logger.Info("error handler succeeded, continuing saga")
 		return outMsg, nil
@@ -137,7 +137,7 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 		}
 	}
 	logger.Info("error handler failed, sending failure event")
-	return message.Message{}, e.publishEvent(ctx, stp, msgForError, message.EventTypeFailed, routing.ErrorTopics)
+	return message.Message{}, e.publishEvent(ctx, stp, msgForError, message.EventTypeFailed, routing.ErrorTopics, outbox.SagaTypeExecute)
 }
 
 // CompensateStep выполняет компенсацию шага
@@ -161,7 +161,7 @@ func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg m
 	routing := stp.GetRouting()
 
 	_, err = e.runWithUserRetry(ctx, stp, msg, stp.GetCompensate(),
-		message.EventTypeFailed, routing.ErrorTopics, stp.GetRetryPolicy())
+		message.EventTypeFailed, routing.ErrorTopics, outbox.SagaTypeCompensate, stp.GetRetryPolicy())
 	if err == nil {
 		logger.Info("compensation committed, messages written to outbox")
 		return nil
@@ -175,7 +175,7 @@ func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg m
 
 	// Сообщение из OnCompensateError уходит в ErrorTopics с типом Failed — цепочка компенсации продолжается.
 	_, handlerErr := e.runErrorHandler(ctx, stp, msg, err, errHandler,
-		message.EventTypeFailed, routing.ErrorTopics)
+		message.EventTypeFailed, routing.ErrorTopics, outbox.SagaTypeCompensate)
 	if handlerErr == nil {
 		logger.Info("compensation error handler succeeded, continuing compensation")
 		return nil
@@ -198,6 +198,7 @@ func (e *StepExecutor) atomicRun(
 	action step.Action,
 	eventType message.MessageType,
 	topics []string,
+	sagaType outbox.SagaType,
 ) (message.Message, error) {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -224,7 +225,7 @@ func (e *StepExecutor) atomicRun(
 		if e.tracingEnabled {
 			tracing.InjectTraceContext(ctx, &result)
 		}
-		if err := e.writer.WriteMessages(ctx, result, tx, topics, stp.Name()); err != nil {
+		if err := e.writer.WriteMessages(ctx, result, tx, topics, stp.Name(), sagaType); err != nil {
 			return message.Message{}, retry.AsRetryable(fmt.Errorf("outbox write: %w", err))
 		}
 	}
@@ -247,11 +248,12 @@ func (e *StepExecutor) runWithInfraRetry(
 	action step.Action,
 	eventType message.MessageType,
 	topics []string,
+	sagaType outbox.SagaType,
 ) (message.Message, error) {
 	var outMsg message.Message
 	err := e.retryInfra(ctx, func(retryCtx context.Context) error {
 		var runErr error
-		outMsg, runErr = e.atomicRun(retryCtx, stp, msg, action, eventType, topics)
+		outMsg, runErr = e.atomicRun(retryCtx, stp, msg, action, eventType, topics, sagaType)
 		return runErr
 	})
 	if err != nil {
@@ -274,16 +276,17 @@ func (e *StepExecutor) runWithUserRetry(
 	action step.Action,
 	eventType message.MessageType,
 	topics []string,
+	sagaType outbox.SagaType,
 	userRetryPolicy *retry.Retrier,
 ) (message.Message, error) {
 	if userRetryPolicy == nil {
-		return e.runWithInfraRetry(ctx, stp, msg, action, eventType, topics)
+		return e.runWithInfraRetry(ctx, stp, msg, action, eventType, topics, sagaType)
 	}
 
 	var outMsg message.Message
 	err := userRetryPolicy.Retry(ctx, func(retryCtx context.Context) error {
 		var runErr error
-		outMsg, runErr = e.runWithInfraRetry(retryCtx, stp, msg, action, eventType, topics)
+		outMsg, runErr = e.runWithInfraRetry(retryCtx, stp, msg, action, eventType, topics, sagaType)
 		return runErr
 	})
 	if err != nil {
@@ -305,6 +308,7 @@ func (e *StepExecutor) runErrorHandler(
 	handler step.ErrorHandler,
 	eventType message.MessageType,
 	topics []string,
+	sagaType outbox.SagaType,
 ) (message.Message, error) {
 	var outMsg message.Message
 	var handlerResultOnErr message.Message
@@ -335,7 +339,7 @@ func (e *StepExecutor) runErrorHandler(
 			if e.tracingEnabled {
 				tracing.InjectTraceContext(retryCtx, &result)
 			}
-			if writeErr := e.writer.WriteMessages(retryCtx, result, tx, topics, stp.Name()); writeErr != nil {
+			if writeErr := e.writer.WriteMessages(retryCtx, result, tx, topics, stp.Name(), sagaType); writeErr != nil {
 				return retry.AsRetryable(fmt.Errorf("outbox write: %w", writeErr))
 			}
 		}
@@ -364,6 +368,7 @@ func (e *StepExecutor) publishEvent(
 	msg message.Message,
 	eventType message.MessageType,
 	topics []string,
+	sagaType outbox.SagaType,
 ) error {
 	if len(topics) == 0 {
 		logger.Infof("no topics configured for event type %s", eventType)
@@ -374,7 +379,7 @@ func (e *StepExecutor) publishEvent(
 	msg.FromStep = stp.Name()
 
 	return e.retryInfra(ctx, func(retryCtx context.Context) error {
-		if err := e.writer.WriteTx(retryCtx, msg, topics, stp.Name(), nil); err != nil {
+		if err := e.writer.WriteTx(retryCtx, msg, topics, stp.Name(), sagaType, nil); err != nil {
 			return retry.AsRetryable(fmt.Errorf("publish event [type=%s]: %w", eventType, err))
 		}
 		return nil

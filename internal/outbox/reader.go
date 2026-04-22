@@ -231,7 +231,7 @@ func (r *Reader) buildBatchQuery() string {
 	p := r.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
 SELECT 
-	saga_id, step_name, topic, created_at, scheduled_at,
+	saga_id, step_name, topic, saga_type, created_at, scheduled_at,
 	metadata, payload, attempts_counter, last_attempt, processed_at
 FROM %s
 WHERE scheduled_at <= NOW()
@@ -242,8 +242,8 @@ LIMIT %s`, qualifiedOutboxTable(r.dbCtx.Dialect()), p(1), p(2))
 }
 
 // buildUpdateOnErrQuery строит UPDATE-запрос при ошибке публикации.
-// Строка идентифицируется по PK (saga_id, topic).
-// args: $1=last_attempt, $2=scheduled_at, $3=saga_id, $4=topic
+// Строка идентифицируется по PK (saga_id, topic, saga_type).
+// args: $1=last_attempt, $2=scheduled_at, $3=saga_id, $4=topic, $5=saga_type
 func (r *Reader) buildUpdateOnErrQuery() string {
 	p := r.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
@@ -254,17 +254,18 @@ SET
 	scheduled_at = %s
 	WHERE 
 	saga_id = %s 
-	AND topic = %s`,
-		qualifiedOutboxTable(r.dbCtx.Dialect()), p(1), p(2), p(3), p(4)) //nolint:mnd
+	AND topic = %s
+	AND saga_type = %s`,
+		qualifiedOutboxTable(r.dbCtx.Dialect()), p(1), p(2), p(3), p(4), p(5)) //nolint:mnd
 }
 
 // buildUpdateOnSuccessQuery строит UPDATE-запрос при успешной публикации.
-// Строка идентифицируется по PK (saga_id, topic).
-// args: $1=processed_at, $2=saga_id, $3=topic
+// Строка идентифицируется по PK (saga_id, topic, saga_type).
+// args: $1=processed_at, $2=saga_id, $3=topic, $4=saga_type
 func (r *Reader) buildUpdateOnSuccessQuery() string {
 	p := r.dbCtx.GetSQLPlaceholder
-	return fmt.Sprintf(`UPDATE %s SET processed_at = %s WHERE saga_id = %s AND topic = %s;`,
-		qualifiedOutboxTable(r.dbCtx.Dialect()), p(1), p(2), p(3)) //nolint:mnd
+	return fmt.Sprintf(`UPDATE %s SET processed_at = %s WHERE saga_id = %s AND topic = %s AND saga_type = %s;`,
+		qualifiedOutboxTable(r.dbCtx.Dialect()), p(1), p(2), p(3), p(4)) //nolint:mnd
 }
 
 func (r *Reader) updateOutboxOnSuccess(
@@ -279,7 +280,7 @@ func (r *Reader) updateOutboxOnSuccess(
 	defer tx.Rollback() //nolint:errcheck
 
 	query := r.buildUpdateOnSuccessQuery()
-	res, err := tx.ExecContext(ctx, query, processedAt, msg.SagaID, msg.Topic)
+	res, err := tx.ExecContext(ctx, query, processedAt, msg.SagaID, msg.Topic, string(msg.SagaType))
 	if err != nil {
 		return 0, err
 	}
@@ -305,7 +306,7 @@ func (r *Reader) updateOutboxOnErr(
 	defer tx.Rollback() //nolint:errcheck
 
 	query := r.buildUpdateOnErrQuery()
-	_, err = tx.ExecContext(ctx, query, lastAttempt, nextAttempt, msg.SagaID, msg.Topic)
+	_, err = tx.ExecContext(ctx, query, lastAttempt, nextAttempt, msg.SagaID, msg.Topic, string(msg.SagaType))
 	if err != nil {
 		return err
 	}
@@ -358,10 +359,12 @@ func (r *Reader) scanBatch(ctx context.Context) (int, error) {
 
 	for rows.Next() {
 		om := r.buffer[rowsCounter]
+		var sagaType string
 		if err := rows.Scan(
 			&om.SagaID,
 			&om.StepName,
 			&om.Topic,
+			&sagaType,
 			&om.CreatedAt,
 			&om.ScheduledAt,
 			&om.Metadata,
@@ -372,6 +375,7 @@ func (r *Reader) scanBatch(ctx context.Context) (int, error) {
 		); err != nil {
 			return rowsCounter, fmt.Errorf("outbox scan row: %w", err)
 		}
+		om.SagaType = SagaType(sagaType)
 		rowsCounter++
 	}
 

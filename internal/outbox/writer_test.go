@@ -46,6 +46,7 @@ func TestWriter_WriteMessages_Success_OneTopic(t *testing.T) {
 			uuid.MustParse(testWriterSagaID),
 			"order-service",
 			"payment.process",
+			string(SagaTypeExecute),
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
@@ -53,7 +54,7 @@ func TestWriter_WriteMessages_Success_OneTopic(t *testing.T) {
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	err = w.WriteMessages(ctx, testMessage(), tx, []string{"payment.process"}, "order-service")
+	err = w.WriteMessages(ctx, testMessage(), tx, []string{"payment.process"}, "order-service", SagaTypeExecute)
 	if err != nil {
 		t.Errorf("WriteMessages: %v", err)
 	}
@@ -84,13 +85,13 @@ func TestWriter_WriteMessages_Success_TwoTopics(t *testing.T) {
 	defer tx.Rollback()
 
 	mock.ExpectExec("INSERT INTO public.outbox").
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "topic1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "topic1", string(SagaTypeExecute), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("INSERT INTO public.outbox").
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "topic2", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "topic2", string(SagaTypeExecute), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	err = w.WriteMessages(ctx, testMessage(), tx, []string{"topic1", "topic2"}, "order-service")
+	err = w.WriteMessages(ctx, testMessage(), tx, []string{"topic1", "topic2"}, "order-service", SagaTypeExecute)
 	if err != nil {
 		t.Errorf("WriteMessages: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestWriter_WriteMessages_InvalidSagaID(t *testing.T) {
 	msg := testMessage()
 	msg.SagaID = "not-a-uuid"
 
-	err = w.WriteMessages(ctx, msg, tx, []string{"topic1"}, "step1")
+	err = w.WriteMessages(ctx, msg, tx, []string{"topic1"}, "step1", SagaTypeExecute)
 	if err == nil {
 		t.Fatal("expected invalid saga_id error")
 	}
@@ -154,10 +155,10 @@ func TestWriter_WriteMessages_ExecError(t *testing.T) {
 	defer tx.Rollback()
 
 	mock.ExpectExec("INSERT INTO public.outbox").
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnError(sql.ErrConnDone)
 
-	err = w.WriteMessages(ctx, testMessage(), tx, []string{"topic1"}, "step1")
+	err = w.WriteMessages(ctx, testMessage(), tx, []string{"topic1"}, "step1", SagaTypeExecute)
 	if err == nil {
 		t.Fatal("expected exec error")
 	}
@@ -182,11 +183,11 @@ func TestWriter_WriteTx_Success(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO public.outbox").
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", nil)
+	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", SagaTypeExecute, nil)
 	if err != nil {
 		t.Errorf("WriteTx: %v", err)
 	}
@@ -217,11 +218,11 @@ func TestWriter_WriteTx_Success_WithTxWorkFunc(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO public.outbox").
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", fn)
+	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", SagaTypeExecute, fn)
 	if err != nil {
 		t.Errorf("WriteTx: %v", err)
 	}
@@ -248,7 +249,7 @@ func TestWriter_WriteTx_BeginError(t *testing.T) {
 
 	mock.ExpectBegin().WillReturnError(sql.ErrConnDone)
 
-	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", nil)
+	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", SagaTypeExecute, nil)
 	if err == nil {
 		t.Fatal("expected begin tx error")
 	}
@@ -272,11 +273,11 @@ func TestWriter_WriteTx_CommitError(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO public.outbox").
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit().WillReturnError(sql.ErrTxDone)
 
-	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", nil)
+	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", SagaTypeExecute, nil)
 	if err == nil {
 		t.Fatal("expected commit error")
 	}
@@ -307,7 +308,7 @@ func TestWriter_WriteTx_FnError(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectRollback()
 
-	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", fn)
+	err = w.WriteTx(ctx, testMessage(), []string{"topic1"}, "step1", SagaTypeExecute, fn)
 	if err == nil {
 		t.Fatal("expected fn error")
 	}
@@ -340,7 +341,7 @@ func TestWriter_WriteMessages_EmptyTopics(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	err = w.WriteMessages(ctx, testMessage(), tx, nil, "step1")
+	err = w.WriteMessages(ctx, testMessage(), tx, nil, "step1", SagaTypeExecute)
 	if err != nil {
 		t.Errorf("WriteMessages: %v", err)
 	}
