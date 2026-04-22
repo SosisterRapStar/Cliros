@@ -88,7 +88,7 @@ func (e *StepExecutor) retryInfra(ctx context.Context, work func(ctx context.Con
 func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg message.Message) (outMsg message.Message, err error) {
 	var span trace.Span
 	if e.tracingEnabled {
-		ctx, span = tracing.StartStepSpan(ctx, e.tracer, e.tracerName, msg.SagaID, stp.Name(), "execute")
+		ctx, span = tracing.StartStepSpan(ctx, e.tracer, e.tracerName, msg.SagaID, stp.Name(), string(outbox.SagaTypeExecute))
 	} else {
 		span = trace.SpanFromContext(ctx)
 	}
@@ -98,7 +98,7 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 	if e.metrics != nil {
 		start := time.Now()
 		defer func() {
-			e.metrics.ObserveStep(stp.Name(), "execute", time.Since(start), err)
+			e.metrics.ObserveStep(stp.Name(), string(outbox.SagaTypeExecute), time.Since(start), err)
 		}()
 	}
 
@@ -116,7 +116,8 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 		if errors.Is(err, inbox.ErrDuplicate) { // if saga already processed
 			return message.Message{}, nil
 		}
-		return message.Message{}, e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics, outbox.SagaTypeExecute)
+		// EventTypeFailed запускает компенсацию ниже по цепочке, поэтому пишем в outbox как compensate-фаза.
+		return message.Message{}, e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics, outbox.SagaTypeCompensate)
 	}
 
 	// Сообщение из OnError уходит в NextStepTopics с типом Complete — сага продолжается.
@@ -137,14 +138,15 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 		}
 	}
 	logger.Info("error handler failed, sending failure event")
-	return message.Message{}, e.publishEvent(ctx, stp, msgForError, message.EventTypeFailed, routing.ErrorTopics, outbox.SagaTypeExecute)
+	// EventTypeFailed запускает компенсацию ниже по цепочке, поэтому пишем в outbox как compensate-фаза.
+	return message.Message{}, e.publishEvent(ctx, stp, msgForError, message.EventTypeFailed, routing.ErrorTopics, outbox.SagaTypeCompensate)
 }
 
 // CompensateStep выполняет компенсацию шага
 func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg message.Message) (err error) {
 	var span trace.Span
 	if e.tracingEnabled {
-		ctx, span = tracing.StartStepSpan(ctx, e.tracer, e.tracerName, msg.SagaID, stp.Name(), "compensate")
+		ctx, span = tracing.StartStepSpan(ctx, e.tracer, e.tracerName, msg.SagaID, stp.Name(), string(outbox.SagaTypeCompensate))
 	} else {
 		span = trace.SpanFromContext(ctx)
 	}
@@ -154,7 +156,7 @@ func (e *StepExecutor) CompensateStep(ctx context.Context, stp *step.Step, msg m
 	if e.metrics != nil {
 		start := time.Now()
 		defer func() {
-			e.metrics.ObserveStep(stp.Name(), "compensate", time.Since(start), err)
+			e.metrics.ObserveStep(stp.Name(), string(outbox.SagaTypeCompensate), time.Since(start), err)
 		}()
 	}
 
@@ -362,6 +364,10 @@ func (e *StepExecutor) runErrorHandler(
 }
 
 // publishEvent записывает событие в outbox через отдельную транзакцию с infra retry.
+//
+// Оборачивает запись в отдельный под-спэн c step.operation=sagaType, чтобы в трейсе
+// было видно, что публикуемое событие относится к compensate-фазе (родительский спэн
+// ExecuteStep помечен как execute, а сам failure-event по смыслу — компенсация).
 func (e *StepExecutor) publishEvent(
 	ctx context.Context,
 	stp *step.Step,
@@ -369,10 +375,18 @@ func (e *StepExecutor) publishEvent(
 	eventType message.MessageType,
 	topics []string,
 	sagaType outbox.SagaType,
-) error {
+) (err error) {
 	if len(topics) == 0 {
 		logger.Infof("no topics configured for event type %s", eventType)
 		return nil
+	}
+
+	if e.tracingEnabled {
+		var span trace.Span
+		ctx, span = tracing.StartStepSpan(ctx, e.tracer, e.tracerName, msg.SagaID, stp.Name(), string(sagaType))
+		defer func() {
+			tracing.EndStepSpan(span, err)
+		}()
 	}
 
 	msg.MessageType = eventType
