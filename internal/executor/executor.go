@@ -113,6 +113,9 @@ func (e *StepExecutor) ExecuteStep(ctx context.Context, stp *step.Step, msg mess
 
 	errHandler := stp.GetOnError()
 	if errHandler == nil {
+		if errors.Is(err, inbox.ErrDuplicate) { // if saga already processed
+			return message.Message{}, nil
+		}
 		return message.Message{}, e.publishEvent(ctx, stp, msg, message.EventTypeFailed, routing.ErrorTopics)
 	}
 

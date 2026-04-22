@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	defaultInterval  = 1 * time.Second
-	defaultBatchSize = 10
+	defaultInterval    = 10 * time.Second
+	defaultBatchSize   = 10
+	defaultMaxAttempts = 5
 )
 
 // BackoffSettings настройки бэкоффа, решает, на какое время запланировать ретрай сообщения
@@ -29,8 +30,9 @@ type BackoffSettings struct {
 
 // PollingSettings настройки поллера, решает как часто будут политься сообщения и сколько сообщений будет вычитано
 type PollingSettings struct {
-	interval  time.Duration
-	batchSize int
+	interval    time.Duration
+	batchSize   int
+	maxAttempts int
 }
 
 type Reader struct {
@@ -69,10 +71,24 @@ func NewPollingSettings(interval time.Duration, batchSize int) PollingSettings {
 	}
 }
 
+// NewPollingSettingsWithMaxAttempts создаёт PollingSettings с явным лимитом попыток.
+// После maxAttempts неудачных попыток публикации строка больше не вычитывается поллером
+// (защита от бесконечной петли).
+func NewPollingSettingsWithMaxAttempts(interval time.Duration, batchSize, maxAttempts int) PollingSettings {
+	return PollingSettings{
+		interval:    interval,
+		batchSize:   batchSize,
+		maxAttempts: maxAttempts,
+	}
+}
+
 func NewReader(dbCtx *database.DBContext, publisher broker.Publisher, polling PollingSettings, boff BackoffSettings, errCh chan<- error) *Reader {
 	batchSize := polling.batchSize
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
+	}
+	if polling.maxAttempts <= 0 {
+		polling.maxAttempts = defaultMaxAttempts
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -128,7 +144,11 @@ func (r *Reader) Close() {
 }
 
 func (r *Reader) polling(userCtx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
+	interval := r.PollingSettings.interval
+	if interval <= 0 {
+		interval = defaultInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -184,8 +204,15 @@ func (r *Reader) handlePublishError(ctx context.Context, msg *OutboxMessage) {
 }
 
 func (r *Reader) handlePublishSuccess(ctx context.Context, msg *OutboxMessage) {
-	if err := r.updateOutboxOnSuccess(ctx, msg, time.Now()); err != nil {
+	affected, err := r.updateOutboxOnSuccess(ctx, msg, time.Now())
+	if err != nil {
 		r.sendError(fmt.Errorf("outbox update on success [saga_id=%s, step=%s]: %w", msg.SagaID, msg.StepName, err))
+		return
+	}
+	if affected == 0 {
+		logger.Warnf("outbox update on success affected 0 rows [saga_id=%s, step=%s, topic=%s]; incrementing attempts to avoid infinite loop",
+			msg.SagaID, msg.StepName, msg.Topic)
+		r.handlePublishError(ctx, msg)
 	}
 }
 
@@ -199,6 +226,7 @@ func (r *Reader) calculateNextAttempt(msg *OutboxMessage) time.Time {
 }
 
 // buildBatchQuery строит SELECT-запрос для вычитки сообщений из outbox.
+// args: $1=max_attempts, $2=batch_size
 func (r *Reader) buildBatchQuery() string {
 	p := r.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
@@ -206,13 +234,16 @@ SELECT
 	saga_id, step_name, topic, created_at, scheduled_at,
 	metadata, payload, attempts_counter, last_attempt, processed_at
 FROM %s
-WHERE scheduled_at <= NOW() AND processed_at IS NULL
+WHERE scheduled_at <= NOW()
+	AND processed_at IS NULL
+	AND attempts_counter < %s
 ORDER BY created_at ASC 
-LIMIT %s`, qualifiedOutboxTable(r.dbCtx.Dialect()), p(1))
+LIMIT %s`, qualifiedOutboxTable(r.dbCtx.Dialect()), p(1), p(2))
 }
 
 // buildUpdateOnErrQuery строит UPDATE-запрос при ошибке публикации.
-// args: $1=saga_id, $2=step_name, $3=last_attempt, $4=scheduled_at
+// Строка идентифицируется по PK (saga_id, topic).
+// args: $1=last_attempt, $2=scheduled_at, $3=saga_id, $4=topic
 func (r *Reader) buildUpdateOnErrQuery() string {
 	p := r.dbCtx.GetSQLPlaceholder
 	return fmt.Sprintf(`
@@ -223,41 +254,43 @@ SET
 	scheduled_at = %s
 	WHERE 
 	saga_id = %s 
-	AND step_name = %s`,
-		qualifiedOutboxTable(r.dbCtx.Dialect()), p(3), p(4), p(1), p(2)) //nolint:mnd
+	AND topic = %s`,
+		qualifiedOutboxTable(r.dbCtx.Dialect()), p(1), p(2), p(3), p(4)) //nolint:mnd
 }
 
 // buildUpdateOnSuccessQuery строит UPDATE-запрос при успешной публикации.
-// args: $1=saga_id, $2=step_name, $3=processed_at
+// Строка идентифицируется по PK (saga_id, topic).
+// args: $1=processed_at, $2=saga_id, $3=topic
 func (r *Reader) buildUpdateOnSuccessQuery() string {
 	p := r.dbCtx.GetSQLPlaceholder
-	return fmt.Sprintf(`
-UPDATE %s
-SET 
-	processed_at = %s
-	WHERE 
-	saga_id = %s 
-	AND step_name = %s`,
-		qualifiedOutboxTable(r.dbCtx.Dialect()), p(3), p(1), p(2)) //nolint:mnd
+	return fmt.Sprintf(`UPDATE %s SET processed_at = %s WHERE saga_id = %s AND topic = %s;`,
+		qualifiedOutboxTable(r.dbCtx.Dialect()), p(1), p(2), p(3)) //nolint:mnd
 }
 
 func (r *Reader) updateOutboxOnSuccess(
 	ctx context.Context,
 	msg *OutboxMessage,
 	processedAt time.Time,
-) error {
+) (int64, error) {
 	tx, err := r.dbCtx.DB().BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	query := r.buildUpdateOnSuccessQuery()
-	_, err = tx.ExecContext(ctx, query, msg.SagaID, msg.StepName, processedAt)
+	res, err := tx.ExecContext(ctx, query, processedAt, msg.SagaID, msg.Topic)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return tx.Commit()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return affected, nil
 }
 
 func (r *Reader) updateOutboxOnErr(
@@ -272,7 +305,7 @@ func (r *Reader) updateOutboxOnErr(
 	defer tx.Rollback() //nolint:errcheck
 
 	query := r.buildUpdateOnErrQuery()
-	_, err = tx.ExecContext(ctx, query, msg.SagaID, msg.StepName, lastAttempt, nextAttempt)
+	_, err = tx.ExecContext(ctx, query, lastAttempt, nextAttempt, msg.SagaID, msg.Topic)
 	if err != nil {
 		return err
 	}
@@ -306,9 +339,18 @@ func (r *Reader) scanBatch(ctx context.Context) (int, error) {
 	logger.Info("scanning batch")
 	rowsCounter := 0
 
+	batchSize := r.PollingSettings.batchSize
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+	maxAttempts := r.PollingSettings.maxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxAttempts
+	}
+
 	query := r.buildBatchQuery()
 	logger.Infof("scanning batch query: %s", query)
-	rows, err := r.dbCtx.DB().QueryContext(ctx, query, 10)
+	rows, err := r.dbCtx.DB().QueryContext(ctx, query, maxAttempts, batchSize)
 	if err != nil {
 		return 0, err
 	}
